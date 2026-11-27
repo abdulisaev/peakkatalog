@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f5f7">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#101010">
+  <meta name="robots" content="noindex,nofollow">
+  <title>PEAK — каталог и пополнение</title>
+  <link rel="icon" href="/mark.svg">
+  <link rel="stylesheet" href="/app.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="bar">
+    <div class="bar-inner">
+      <a class="brand" href="/" aria-label="PEAK, главная"><span class="peak-sign"><svg aria-hidden="true" viewBox="0 0 64 48"><path fill="#ef3931" d="M2 44 30 2h7l19 29H44L34 16 21 35h36l6 9z"/></svg><img src="/logo.png" alt="PEAK" width="72" height="28"></span><span>Каталог</span></a>
+      <nav aria-label="Разделы">
+        <button id="catalog-tab" type="button" aria-current="page">Каталог</button>
+        <button id="orders-tab" type="button">Заявки</button>
+      </nav>
+      <div class="top-actions">
+        <label class="location"><span id="account-name"></span><select id="demo-role" aria-label="Магазин или склад в демонстрации" hidden></select></label>
+        <button id="cart-button" class="cart-button" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h2l2.6 12h10.9l2.5-8H6.3M9 20h.01M17 20h.01"/></svg><span>Корзина</span><b id="cart-count">0</b></button>
+      </div>
+    </div>
+  </header>
+  <main class="shell">
+
+    <p id="notice" class="notice" role="status" hidden></p>
+    <section id="catalog" aria-label="Ассортимент">
+      <div class="catalog-tools"><label class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><input id="search" type="search" placeholder="Артикул, название или цвет" aria-label="Поиск товара" autocomplete="off"></label><button id="filter-toggle" class="secondary" aria-haspopup="dialog">Фильтры</button></div>
+      <dialog id="filter-dialog" aria-labelledby="filter-title">
+        <form method="dialog"><header><h2 id="filter-title">Фильтры</h2><button value="cancel" aria-label="Закрыть" class="close">×</button></header>
+        <label>Категория<select id="category"><option value="">Все категории</option></select></label>
+        <label>Сезон<select id="season"><option value="">Все сезоны</option></select></label>
+        <label>Размер<select id="size"><option value="">Все размеры</option></select></label>
+        <label>Нужны магазину<select id="store-needs"><option value="">Все товары</option><option value="size">Недостающие размеры</option><option value="article">Артикулы, которых нет в магазине</option></select></label>
+        <label class="stock-choice"><input id="in-stock" type="checkbox">Есть на Лиственной</label>
+        <footer><button class="secondary" type="button" id="filter-reset">Сбросить</button><button class="primary" value="apply">Применить</button></footer></form>
+      </dialog><div class="heading"><h2>Ассортимент</h2><span id="result-count" aria-live="polite"></span></div>
+      <div id="grid" class="grid" aria-busy="true"></div>
+      <div id="pager"></div>
+    </section>
+    <section id="orders" aria-label="Заявки" hidden>
+      <div class="heading"><h2 id="orders-title">Заявки</h2><button id="refresh-orders" class="secondary" type="button">Обновить</button></div>
+      <div id="order-list"></div>
+    </section>
+  </main>
+  <dialog id="product-dialog" aria-labelledby="product-title"></dialog>
+  <dialog id="photo-dialog" aria-label="Фотография товара">
+    <div class="viewer-bar"><span id="photo-title"></span><button class="close" id="photo-close" aria-label="Закрыть фото">×</button></div>
+    <div class="viewer-frame"><div class="viewer-canvas"><img id="photo-full" alt=""></div></div>
+  </dialog>
+  <dialog id="cart-dialog" aria-labelledby="cart-title"></dialog>
+  <p id="toast" class="toast" role="status" hidden></p>
+</body>
+</html>
