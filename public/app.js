@@ -1,23 +1,83 @@
+// PEAK — каталог и пополнение магазинов с главного склада «Лиственная».
+// Работает в трёх режимах: боевой (сервер + 1С), демо для владельца и офлайн-файл (file://).
+
 const $ = id => document.getElementById(id);
-const safe = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const safe = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const normalize = value => String(value ?? '').trim().toLocaleLowerCase('ru-RU').replaceAll('ё', 'е');
-const key = (article, color, size) => JSON.stringify([article.trim().toUpperCase(), color.trim().toLowerCase(), size.trim().toUpperCase()]);
-const moneyless = new Intl.NumberFormat('ru-RU');
-const sort = new Intl.Collator('ru-RU', { numeric: true });
-const sizes = ['3XS','2XS','XXS','XS','S','M','L','XL','2XL','XXL','3XL','4XL','5XL','6XL','7XL','8XL'];
-const sizeOrder = (a, b) => sizes.includes(a) && sizes.includes(b) ? sizes.indexOf(a) - sizes.indexOf(b) : sort.compare(a,b);
+const key = (article, color, size) => JSON.stringify([String(article).trim().toUpperCase(), String(color).trim().toLowerCase(), String(size).trim().toUpperCase()]);
+const fmt = new Intl.NumberFormat('ru-RU');
+const collator = new Intl.Collator('ru-RU', { numeric: true, sensitivity: 'base' });
 const clock = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Europe/Moscow' });
-const pageSize = 24;
-const state = { demo: false, demoLocations: [], user: null, catalog: [], products: new Map(), front: [], cart: new Map(), orderId: null,
-  page: 0, started: false, loadingStock: false, updated: null, stocks: { store: [], warehouse: [] }, active: 'catalog' };
+const timeOnly = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' });
+const offline = location.protocol === 'file:';
+const WAREHOUSE = 'listvennaya';
+const STALE_MINUTES = 75;
+const PAGE = 24;
+const MAX_LINES = 250; // столько позиций сервер принимает в одной заявке
 const statusLabels = { new: 'Новая', done: 'Перемещение оформлено', rejected: 'Отклонена' };
+const plural = (n, one, few, many) => {
+  const m10 = n % 10, m100 = n % 100;
+  return m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many;
+};
+const icons = {
+  copy: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 5H6a2 2 0 0 0-2 2v9"/></svg>',
+  prev: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg>',
+  next: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>',
+  link: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
+  peak: '<svg viewBox="0 0 64 48" aria-hidden="true"><path fill="currentColor" d="M2 44 30 2h7l19 29H44L34 16 21 35h36l6 9z"/></svg>'
+};
+
+// ---------- Размеры и сезоны ----------
+const LETTER_SIZES = ['3XS', '2XS', 'XXS', 'XS', 'S', 'M', 'L', 'XL', '2XL', 'XXL', '3XL', 'XXXL', '4XL', '5XL', '6XL', '7XL', '8XL'];
+function sizeRank(size) {
+  const value = String(size).trim().toUpperCase();
+  if (!value) return [3, 0, ''];
+  if (/^\d+([.,]\d+)?$/.test(value)) return [0, Number(value.replace(',', '.')), value];
+  const letter = LETTER_SIZES.indexOf(value);
+  return letter >= 0 ? [1, letter, value] : [2, 0, value];
+}
+const sizeOrder = (a, b) => {
+  const x = sizeRank(a), y = sizeRank(b);
+  return x[0] - y[0] || x[1] - y[1] || collator.compare(x[2], y[2]);
+};
+const sizeName = size => size || 'Единый';
+const seasonRank = season => { const m = /^(\d\d)Q(\d)$/i.exec(season || ''); return m ? Number(m[1]) * 10 + Number(m[2]) : 0; };
+
+// Названия товаров, которых ещё нет в каталоге, приходят из 1С вида «Носки PEAK (W3252011) 6q2».
+// Из них получаем чистое название, сезон и категорию, чтобы такие товары не падали в «Без категории».
+const SHOES = /^(кроссовки|кроссовок|кеды|тапочки|сланцы|шлепанцы|сандали|сандалии|бутсы|ботинки|слипоны|мокасины|кеды-)/i;
+const CLOTHES = /^(футболка|брюки|куртка|пуховик|шорты|свитер|ветровка|лонгслив|свитшот|жилетка|жилет|худи|майка|поло|штаны|кофта|тайтсы|лосины|леггинсы|юбка|платье|рубашка|рашгард|бомбер|толстовка|костюм|джинсы|форма|комбинезон|топ|олимпийка|бра)/i;
+function describe(label, article) {
+  let name = String(label || '').replace(/\s*\([^)]*\)\s*/g, ' ');
+  let season = '';
+  const code = /\s(\d)q(\d)\s*$/i.exec(name);
+  if (code) { season = '2' + code[1] + 'Q' + code[2]; name = name.slice(0, code.index); }
+  name = name.replace(/\s+/g, ' ').trim() || article;
+  const kids = /\bkids\b|детск/i.test(name);
+  const kind = SHOES.test(name) ? 'Обувь' : CLOTHES.test(name) ? 'Одежда' : 'Аксессуары';
+  return { name, season, category: (kids ? 'Дети' : 'Взрослые') + ' · ' + kind };
+}
+
+// ---------- Состояние ----------
+const state = {
+  demo: false, demoLocations: [], user: null, catalog: [],
+  products: [], byArticle: new Map(), filtered: [], shown: 0,
+  stocks: { store: [], warehouse: [] }, updated: null, stockDenied: false, loadingStock: false,
+  cart: new Map(), orderId: null, comment: '',
+  orders: [], ordersLoaded: false,
+  active: 'catalog',
+  f: { q: '', aud: '', kind: '', season: '', size: '', need: '', wh: false, sort: '' },
+  of: { status: 'new', store: '', q: '' },
+  current: null, draft: new Map()
+};
 const productDialog = $('product-dialog');
 const cartDialog = $('cart-dialog');
-cartDialog.classList.add('cart-dialog');
-const offline = location.protocol === 'file:';
+const photoDialog = $('photo-dialog');
 let toastTimer;
 let orderRead = 0;
 
+// ---------- Общие функции ----------
 async function api(path, body, method = 'POST') {
   if (offline && path === '/api/session') return { user: null };
   if (offline && path === '/data/catalog.json') return window.PEAK_DEMO_DATA.catalog;
@@ -25,24 +85,15 @@ async function api(path, body, method = 'POST') {
   const options = body === undefined ? {} : { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) };
   const response = await fetch(path, options);
   const data = await response.json().catch(() => null);
-  if (!response.ok || data === null) throw new Error(data?.error || 'Не удалось загрузить данные. Повторите попытку.');
+  if (!response.ok || data === null) {
+    const error = new Error(data?.error || 'Не удалось загрузить данные. Повторите попытку.');
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
-
-function storageRead(name, fallback) {
-  try { return JSON.parse(localStorage.getItem(name)) ?? fallback; } catch { return fallback; }
-}
-function storageWrite(name, value) {
-  try { localStorage.setItem(name, JSON.stringify(value)); return true; } catch { return false; }
-}
-function cartStoreKey() { return 'peak-cart-v1-' + (state.demo ? 'demo-' : state.user.id + '-') + state.user.store; }
-function restoreCart() {
-  const result = storageRead(cartStoreKey(), { id: null, lines: [] });
-  state.orderId = result.id;
-  state.cart = new Map(result.lines.map(line => [key(line.a, line.color, line.size), line]));
-  updateCartCount();
-}
-function saveCart() { storageWrite(cartStoreKey(), { id: state.orderId, lines: [...state.cart.values()] }); }
+function storageRead(name, fallback) { try { return JSON.parse(localStorage.getItem(name)) ?? fallback; } catch { return fallback; } }
+function storageWrite(name, value) { try { localStorage.setItem(name, JSON.stringify(value)); return true; } catch { return false; } }
 function notify(message) {
   $('toast').textContent = message;
   $('toast').hidden = false;
@@ -54,520 +105,994 @@ function banner(message, warn = false) {
   $('notice').textContent = message;
   $('notice').classList.toggle('warn', warn);
 }
-function canOrder() { return state.user?.role === 'store'; }
-function currentStock() { return state.demo || Boolean(state.updated && Date.now() - Date.parse(state.updated) <= 75 * 60_000); }
-function qty(value) { return value == null ? '—' : moneyless.format(value); }
-function date(value) { return clock.format(new Date(value)); }
-function updateCartCount() { $('cart-count').textContent = moneyless.format([...state.cart.values()].reduce((n, line) => n + line.qty, 0)); }
-function updateAccount() {
-  $('demo-role').hidden = !state.demo;
-  $('account-name').textContent = !state.demo && state.user ? state.user.name : '';
-  $('catalog-tab').hidden=!canOrder();
-  $('cart-button').hidden = !canOrder();
-  $('orders-title').textContent = canOrder() ? 'Заявки моего магазина' : 'Заявки на Лиственную';
+const canOrder = () => state.user?.role === 'store';
+const isWarehouse = () => state.user?.role === 'warehouse';
+const hasStock = () => state.demo || Boolean(state.updated);
+const stockFresh = () => state.demo || Boolean(state.updated && Date.now() - Date.parse(state.updated) <= STALE_MINUTES * 60_000);
+const qty = value => value == null ? '—' : fmt.format(value);
+const numClass = value => value == null ? '' : value < 0 ? 'neg' : value === 0 ? 'zero' : 'pos';
+function photoSrc(kind, id) {
+  if (id == null) return null;
+  if (window.PEAK_PHOTOS) return window.PEAK_PHOTOS[kind + '-' + Number(id)] ?? null;
+  return (offline ? './' : '/') + 'photo/' + kind + '-' + Number(id) + '.jpg';
 }
-function selectDemoLocation(id) {
-  const warehouse = state.demoLocations.find(loc => loc.id === 'listvennaya');
-  const location = state.demoLocations.find(loc => loc.id === id);
-  if (!location || !warehouse) throw new Error('В примере отсутствует нужный склад.');
-  const role = id === warehouse.id ? 'warehouse' : 'store';
-  state.user = { role, store: id, name: location.name };
-  state.stocks = { warehouse: warehouse.rows, store: role === 'store' ? location.rows : [] };
-  if (canOrder()) restoreCart();
-  updateAccount();
-  buildIndex();
-  renderCatalog();
-  $('demo-role').value = id;
-  if (!canOrder()) showSection('orders'); else if (state.active === 'orders') void loadOrders();
+function photoMarkup(id, kind, label, eager = false) {
+  const src = photoSrc(kind, id);
+  if (!src) return `<span class="no-photo">${icons.peak}Нет фото</span>`;
+  const side = kind === 'thumb' ? 250 : 580;
+  return `<img src="${safe(src)}" width="${side}" height="${side}" alt="${safe(label)}" ${eager ? 'fetchpriority="high"' : 'loading="lazy"'} decoding="async">`;
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch {
+    const area = Object.assign(document.createElement('textarea'), { value: text });
+    document.body.append(area); area.select();
+    const done = document.execCommand?.('copy'); area.remove(); return Boolean(done);
+  }
+}
+function download(filename, text, type = 'text/csv;charset=utf-8') {
+  const url = URL.createObjectURL(new Blob(['﻿' + text], { type }));
+  const link = Object.assign(document.createElement('a'), { href: url, download: filename });
+  document.body.append(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+const csv = rows => rows.map(row => row.map(cell => {
+  const text = String(cell ?? '');
+  return /[;"\n\r]/.test(text) ? '"' + text.replaceAll('"', '""') + '"' : text;
+}).join(';')).join('\r\n');
+const fileStamp = () => new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+const confirmDialog = $('confirm-dialog');
+function ask(text, yes = 'Да') {
+  $('confirm-text').textContent = text;
+  $('confirm-yes').textContent = yes;
+  confirmDialog.returnValue = '';
+  confirmDialog.showModal();
+  return new Promise(resolve => confirmDialog.addEventListener('close', () => resolve(confirmDialog.returnValue === 'yes'), { once: true }));
 }
 
+// ---------- Корзина в браузере ----------
+const cartStoreKey = () => 'peak-cart-v2-' + (state.demo ? 'demo-' : state.user.id + '-') + state.user.store;
+function restoreCart() {
+  const saved = storageRead(cartStoreKey(), null) ?? storageRead(cartStoreKey().replace('-v2-', '-v1-'), { id: null, lines: [] });
+  state.orderId = saved.id ?? null;
+  state.comment = saved.comment ?? '';
+  state.cart = new Map((saved.lines ?? []).map(line => [key(line.a, line.color, line.size), line]));
+  updateCartCount();
+}
+function saveCart() { storageWrite(cartStoreKey(), { id: state.orderId, comment: state.comment, lines: [...state.cart.values()] }); }
+function cartTotal() { return [...state.cart.values()].reduce((n, line) => n + line.qty, 0); }
+function updateCartCount(bump = false) {
+  $('cart-count').textContent = fmt.format(cartTotal());
+  if (bump) { const b = $('cart-button'); b.classList.remove('bump'); void b.offsetWidth; b.classList.add('bump'); }
+}
+function inCart(sku) { return state.cart.get(sku)?.qty ?? 0; }
+function addToCart(lines) {
+  let added = 0;
+  for (const { a, color, size, qty: n } of lines) {
+    if (!(n > 0)) continue;
+    const sku = key(a, color, size);
+    const line = state.cart.get(sku) ?? { a, color, size, qty: 0 };
+    line.qty += n; added += n;
+    state.cart.set(sku, line);
+  }
+  if (added) { state.orderId = null; saveCart(); updateCartCount(true); }
+  return added;
+}
+
+// ---------- Индекс товаров ----------
 function buildIndex() {
-  const storeStock = new Map(state.stocks.store.map(row => [key(...row), row[3]]));
-  const warehouseStock = new Map(state.stocks.warehouse.map(row => [key(...row), row[3]]));
-  const productMap = new Map();
-  function ensureProduct(article, name, season = '', category = 'Без категории', photo = null) {
-    const identifier = article.trim().toUpperCase();
-    if (!productMap.has(identifier)) productMap.set(identifier, { a: article, n: name || article, s: season, c: category, photo, colors: new Map() });
-    return productMap.get(identifier);
-  }
-  function ensureColor(product, name, photo = null) {
-    const identifier = name.trim().toLowerCase();
-    if (!product.colors.has(identifier)) product.colors.set(identifier, { color: name, photo, sizes: new Map() });
-    return product.colors.get(identifier);
-  }
-  for (const product of state.catalog) {
-    const model = ensureProduct(product.a, product.n, product.s, product.c, product.photo);
-    for (const variant of product.variants) {
-      const color = ensureColor(model, variant.color, variant.photo);
+  const storeStock = new Map(state.stocks.store.map(row => [key(row[0], row[1], row[2]), row[3]]));
+  const whStock = new Map(state.stocks.warehouse.map(row => [key(row[0], row[1], row[2]), row[3]]));
+  const map = new Map();
+  const ensureProduct = (article, info) => {
+    const id = article.trim().toUpperCase();
+    if (!map.has(id)) map.set(id, { a: article.trim(), n: info.name, s: info.season, c: info.category, photo: info.photo ?? null, colors: new Map(), listed: info.listed });
+    return map.get(id);
+  };
+  const ensureColor = (product, name, photo = null) => {
+    const id = name.trim().toLowerCase();
+    if (!product.colors.has(id)) product.colors.set(id, { color: name, photo, sizes: new Map() });
+    const color = product.colors.get(id);
+    color.photo ??= photo;
+    return color;
+  };
+  for (const item of state.catalog) {
+    const product = ensureProduct(item.a, { name: item.n || item.a, season: item.s || '', category: item.c || 'Без категории', photo: item.photo, listed: true });
+    for (const variant of item.variants) {
+      const color = ensureColor(product, variant.color, variant.photo);
       for (const size of variant.sizes) color.sizes.set(size.trim().toUpperCase(), size);
     }
   }
-  const reportedVariants = state.demo
-    ? state.demoLocations.flatMap(location => location.rows)
-    : [...state.stocks.warehouse, ...state.stocks.store];
-  for (const [article, name, size, , label] of reportedVariants) {
-    const color = ensureColor(ensureProduct(article, label), name);
-    color.sizes.set(size.trim().toUpperCase(), size);
+  const reported = state.demo ? state.demoLocations.flatMap(loc => loc.rows) : [...state.stocks.warehouse, ...state.stocks.store];
+  for (const [article, colorName, size, , label] of reported) {
+    if (!map.has(article.trim().toUpperCase())) ensureProduct(article, { ...describe(label, article), listed: false });
+    ensureColor(map.get(article.trim().toUpperCase()), colorName).sizes.set(size.trim().toUpperCase(), size);
   }
-  state.front = [...productMap.values()].map(p => {
+  const storeView = canOrder();
+  const known = hasStock();
+  state.products = [...map.values()].map((p, order) => {
     const colors = [...p.colors.values()].map(c => ({
       color: c.color, photo: c.photo,
       lines: [...c.sizes.values()].sort(sizeOrder).map(size => {
         const sku = key(p.a, c.color, size);
-        return { size, store: (state.updated || state.demo) && canOrder() ? (storeStock.get(sku) ?? 0) : null,
-          warehouse: state.updated || state.demo ? (warehouseStock.get(sku) ?? 0) : null };
+        return { size, sku, store: known && storeView ? (storeStock.get(sku) ?? 0) : null, wh: known ? (whStock.get(sku) ?? 0) : null };
       })
     }));
-    return { ...p, colors, hay: normalize([p.a,p.n,...colors.map(c => c.color)].join(' ')) };
+    const lines = colors.flatMap(c => c.lines);
+    const sum = field => lines.some(l => l[field] != null) ? lines.reduce((t, l) => t + (l[field] ?? 0), 0) : null;
+    const needLines = storeView ? lines.filter(l => l.store <= 0 && l.wh > 0) : [];
+    const inStore = storeView && lines.some(l => l.store > 0);
+    const sizes = new Map();
+    for (const l of lines) {
+      const s = sizes.get(l.size) ?? { size: l.size, have: false, need: false };
+      if (storeView ? l.store > 0 : l.wh > 0) s.have = true;
+      if (storeView && l.store <= 0 && l.wh > 0) s.need = true;
+      sizes.set(l.size, s);
+    }
+    return {
+      ...p, order, colors,
+      photo: p.photo ?? colors.find(c => c.photo != null)?.photo ?? null,
+      store: sum('store'), wh: sum('wh'),
+      whModels: lines.some(l => l.wh > 0),
+      need: needLines.length, needQty: needLines.length,
+      absent: storeView && !inStore && lines.some(l => l.wh > 0),
+      gap: storeView && inStore && needLines.length > 0,
+      neg: lines.filter(l => l.store < 0 || l.wh < 0).length,
+      sizes: [...sizes.values()].sort((x, y) => sizeOrder(x.size, y.size)),
+      rank: seasonRank(p.s),
+      hay: normalize([p.a, p.n, p.c, p.s, ...colors.map(c => c.color)].join(' '))
+    };
   });
-  state.products = new Map(state.front.map(p => [p.a, p]));
-  fillSelect('category', state.front.map(p => p.c));
-  fillSelect('season', state.front.map(p => p.s), (a,b) => sort.compare(b,a));
-  fillSelect('size', state.front.flatMap(p => p.colors.flatMap(c => c.lines.map(line => line.size))), sizeOrder);
+  state.byArticle = new Map(state.products.map(p => [p.a, p]));
+  fillSelect('season', state.products.map(p => p.s), (a, b) => seasonRank(b) - seasonRank(a), 'Все сезоны');
+  fillSelect('size', state.products.flatMap(p => p.sizes.map(s => s.size)).filter(Boolean), sizeOrder, 'Все размеры');
 }
-function fillSelect(id, values, comparator = sort.compare) {
+function fillSelect(id, values, comparator, allLabel) {
   const select = $(id);
-  const selected = select.value;
-  select.length = 1;
+  const selected = state.f[id] ?? select.value;
+  select.replaceChildren(new Option(allLabel, ''));
   for (const value of [...new Set(values.filter(Boolean))].sort(comparator)) select.add(new Option(value, value));
-  select.value = [...select.options].some(option => option.value === selected) ? selected : '';
+  select.value = [...select.options].some(o => o.value === selected) ? selected : '';
+  state.f[id] = select.value;
 }
 
-function showSync(){banner(!state.demo && state.updated && !currentStock() ? 'Остатки устарели.' : '');}
+// ---------- Фильтры ----------
+function matches(p, f, terms) {
+  if (f.aud && !p.c.startsWith(f.aud)) return false;
+  if (f.kind && !p.c.endsWith(f.kind)) return false;
+  if (f.season && p.s !== f.season) return false;
+  if (!terms.every(term => p.hay.includes(term))) return false;
+  const lines = f.size ? p.colors.flatMap(c => c.lines).filter(l => l.size === f.size) : null;
+  if (lines && !lines.length) return false;
+  if (f.wh && !(lines ? lines.some(l => l.wh > 0) : p.whModels)) return false;
+  if (f.need === 'size' && !(p.gap && (!lines || lines.some(l => l.store <= 0 && l.wh > 0)))) return false;
+  if (f.need === 'article' && !p.absent) return false;
+  if (f.need === 'negative' && !p.neg) return false;
+  return true;
+}
+const sorters = {
+  new: (a, b) => b.rank - a.rank || a.order - b.order,
+  wh: (a, b) => (b.wh ?? 0) - (a.wh ?? 0) || a.order - b.order,
+  need: (a, b) => b.need - a.need || (b.wh ?? 0) - (a.wh ?? 0),
+  low: (a, b) => (a.store ?? 0) - (b.store ?? 0) || (b.wh ?? 0) - (a.wh ?? 0),
+  name: (a, b) => collator.compare(a.n, b.n) || collator.compare(a.a, b.a)
+};
+function activeFilterCount() {
+  const f = state.f;
+  return [f.q, f.aud, f.kind, f.season, f.size, f.need, f.wh].filter(Boolean).length;
+}
+function syncControls() {
+  const f = state.f;
+  if (document.activeElement !== $('search') && $('search').value !== f.q) $('search').value = f.q;
+  for (const id of ['season', 'size', 'need', 'sort']) { $(id).value = f[id]; $(id).classList.toggle('active', Boolean(f[id]) && id !== 'sort'); }
+  for (const b of document.querySelectorAll('[data-aud]')) b.setAttribute('aria-pressed', String(b.dataset.aud === f.aud));
+  for (const b of document.querySelectorAll('[data-kind]')) b.setAttribute('aria-pressed', String(b.dataset.kind === f.kind));
+  $('in-stock').setAttribute('aria-pressed', String(f.wh));
+  $('reset').hidden = !activeFilterCount() && !f.sort;
+  $('need').closest('label').hidden = !canOrder();
+  for (const b of document.querySelectorAll('.kpi[data-need]')) b.setAttribute('aria-pressed', String(b.dataset.need === f.need));
+  const whKpi = document.querySelector('.kpi[data-wh]'); whKpi?.setAttribute('aria-pressed', String(f.wh && !f.need));
+}
 
-function photoMarkup(id, kind, label, fast = false) {
-  return id == null ? '<span class="photo-placeholder">Нет фото</span>'
-    : `<img src="${offline ? './' : '/'}photo/${kind}-${Number(id)}.jpg" width="${kind === 'thumb' ? 250 : 580}" height="${kind === 'thumb' ? 250 : 580}" alt="${safe(label)}" ${fast ? 'fetchpriority="high"' : 'loading="lazy"'} decoding="async">`;
+// ---------- Адрес страницы: фильтры и открытый товар можно отправить ссылкой ----------
+function writeHash() {
+  const p = new URLSearchParams();
+  for (const [name, value] of Object.entries(state.f)) if (value) p.set(name, value === true ? '1' : value);
+  p.set('tab', state.active);
+  if (state.active === 'catalog' && !isWarehouse()) p.delete('tab');
+  if (state.current) p.set('p', state.current.article);
+  const hash = p.toString();
+  try { history.replaceState(history.state, '', hash ? '#' + hash : location.pathname + location.search); } catch { /* file:// в некоторых браузерах */ }
 }
-function sum(lines, field) {
-  return lines.some(line => line[field] != null) ? lines.reduce((total, line) => total + (line[field] ?? 0), 0) : null;
+function readHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  for (const name of Object.keys(state.f)) state.f[name] = name === 'wh' ? p.get(name) === '1' : (p.get(name) ?? '');
+  return { tab: p.get('tab'), product: p.get('p') };
 }
-function tile(p, lines, index) {
-  const shop = sum(lines,'store');
-  const warehouse = sum(lines,'warehouse');
+
+// ---------- Сводка ----------
+function renderSummary() {
+  const box = $('summary');
+  if (!hasStock() || !state.user) { box.replaceChildren(); return; }
+  const P = state.products;
+  const whModels = P.filter(p => p.whModels);
+  const whQty = P.reduce((t, p) => t + Math.max(0, p.wh ?? 0), 0);
+  const neg = P.filter(p => p.neg).length;
+  const kpi = (attrs, label, value, note, cls = '') => `<button type="button" class="kpi ${cls}" ${attrs} aria-pressed="false"><span>${label}</span><b>${value}</b><small>${note}</small></button>`;
+  if (canOrder()) {
+    const absent = P.filter(p => p.absent);
+    const gaps = P.filter(p => p.gap);
+    const gapSizes = gaps.reduce((t, p) => t + p.need, 0);
+    const store = P.filter(p => p.colors.some(c => c.lines.some(l => l.store > 0)));
+    box.innerHTML =
+      kpi('data-need="article"', 'Нет в магазине, есть на Лиственной', fmt.format(absent.length), plural(absent.length, 'модель', 'модели', 'моделей') + ' можно завезти', 'alert') +
+      kpi('data-need="size"', 'Разбитые размерные ряды', fmt.format(gaps.length), fmt.format(gapSizes) + ' ' + plural(gapSizes, 'размер', 'размера', 'размеров') + ' есть на Лиственной', 'warn') +
+      kpi('data-wh="1"', 'Есть на Лиственной', fmt.format(whModels.length), fmt.format(whQty) + ' шт.') +
+      (neg ? kpi('data-need="negative"', 'Отрицательные остатки', fmt.format(neg), 'проверить учёт в 1С') :
+        `<div class="kpi"><span>В моём магазине</span><b>${fmt.format(store.length)}</b><small>${fmt.format(P.reduce((t, p) => t + Math.max(0, p.store ?? 0), 0))} шт.</small></div>`);
+  } else {
+    const fresh = state.orders.filter(o => o.status === 'new');
+    box.innerHTML =
+      kpi('data-wh="1"', 'На Лиственной', fmt.format(whModels.length), fmt.format(whQty) + ' шт. в наличии') +
+      `<button type="button" class="kpi alert" data-goto="orders"><span>Новые заявки</span><b>${state.ordersLoaded ? fmt.format(fresh.length) : '…'}</b><small>${fmt.format(fresh.reduce((t, o) => t + o.items.reduce((n, i) => n + i.qty, 0), 0))} шт. к перемещению</small></button>` +
+      kpi('data-need="negative"', 'Отрицательные остатки', fmt.format(neg), 'проверить учёт в 1С', neg ? 'warn' : '') +
+      `<div class="kpi"><span>Без фотографии</span><b>${fmt.format(P.filter(p => p.photo == null && p.whModels).length)}</b><small>моделей в наличии</small></div>`;
+  }
+  syncControls();
+}
+
+// ---------- Каталог ----------
+function tile(p, index) {
+  const storeView = canOrder();
+  const status = !storeView ? '' : p.absent ? '<span class="tag state absent">Нет в магазине</span>'
+    : p.gap ? `<span class="tag state gap">−${p.need} ${plural(p.need, 'размер', 'размера', 'размеров')}</span>` : '';
+  const negTag = !status && p.neg ? '<span class="tag state neg">Минус в учёте</span>' : '';
+  const sizes = p.sizes.length > 1 || p.sizes[0]?.size ? p.sizes : [];
+  const chips = sizes.slice(0, 9).map(s => `<i class="sz ${s.need ? 'need' : s.have ? 'have' : ''}">${safe(sizeName(s.size))}</i>`).join('')
+    + (sizes.length > 9 ? `<i class="sz more">+${sizes.length - 9}</i>` : '');
+  const colorsNote = p.colors.length > 1 ? `${p.colors.length} ${plural(p.colors.length, 'цвет', 'цвета', 'цветов')}` : safe(p.colors[0]?.color || '');
+  const strip = storeView
+    ? `<span>Мой магазин<b class="${numClass(p.store)}">${qty(p.store)}</b></span><span>Лиственная<b class="${numClass(p.wh)}">${qty(p.wh)}</b></span>`
+    : `<span>Лиственная<b class="${numClass(p.wh)}">${qty(p.wh)}</b></span><span>Цвета / размеры<b>${p.colors.length} / ${sizes.length || 1}</b></span>`;
   return `<button class="tile" type="button" data-product="${safe(p.a)}">
-    <span class="photo">${photoMarkup(p.photo,'thumb',p.n,index < 3)}${p.s ? `<span class="season-badge">${safe(p.s)}</span>` : ''}</span>
-    <span class="tile-body"><span class="name">${safe(p.n)}</span>
-    <span class="variants">${safe(p.colors.map(c => c.color).filter(Boolean).join(' · ') || p.c)}</span>
-    <span class="tile-code">${safe(p.a)}</span><span class="size-list">${[...new Set(lines.filter(l=>l.warehouse>0).map(l=>l.size))].slice(0,6).map(z=>"<i>"+safe(z||"Единый")+"</i>").join("")}</span><span class="stock-strip"><span>Мой магазин<b>${qty(shop)}</b></span><span>Лиственная<b class="${warehouse > 0 ? 'available' : ''}">${qty(warehouse)}</b></span></span></span>
-  </button>`;
+    <span class="photo">${photoMarkup(p.photo, 'thumb', p.n, index < 4)}${p.s ? `<span class="tag season">${safe(p.s)}</span>` : ''}${status || negTag}</span>
+    <span class="tile-body">
+      <span class="name">${safe(p.n)}</span>
+      <span class="meta"><span class="code">${safe(p.a)}</span><span>· ${colorsNote}</span></span>
+      ${chips ? `<span class="sizes">${chips}</span>` : '<span class="sizes"></span>'}
+      <span class="strip">${strip}</span>
+    </span></button>`;
 }
-function replenishmentModel(model, mode, size) {
-  if (!mode) return model;
-  if (mode === 'article' && model.colors.some(c => c.lines.some(line => line.store !== 0))) return null;
-  const colors = model.colors.map(color => ({
-    ...color,
-    lines: color.lines.filter(line => line.store === 0 && line.warehouse > 0 && (!size || line.size === size))
-  })).filter(color => color.lines.length);
-  return colors.length ? { ...model, colors, photo: colors[0].photo ?? model.photo } : null;
-}
-const displayedProducts = new Map();
 function renderCatalog() {
-  const terms = normalize($('search').value).split(/\s+/).filter(Boolean);
-  const category = $('category').value;
-  const season = $('season').value;
-  const size = $('size').value;
-  const inStock = $('in-stock').checked;
-  const needs = $('store-needs').value;
-  const found = [];
-  displayedProducts.clear();
-  for (const original of state.front) {
-    const model = replenishmentModel(original, needs, size);
-    if (!model) continue;
-    if ((category && category !== model.c) || (season && season !== model.s) || !terms.every(term => model.hay.includes(term))) continue;
-    const lines = model.colors.flatMap(c => c.lines).filter(line => !size || line.size === size);
-    if ((size && !lines.length) || (inStock && !lines.some(line => line.warehouse > 0))) continue;
-    displayedProducts.set(model.a, model);
-    found.push({ model, lines });
-  }
-  filtered = found;
-  shown = 0;
-  $('grid').replaceChildren();
-  $('grid').setAttribute('aria-busy','false');
-  $('result-count').textContent = 'Найдено: '+moneyless.format(found.length);
-  if (!found.length) $('grid').innerHTML='<p class="empty">Товары не найдены</p>';
+  const f = state.f;
+  const terms = normalize(f.q).split(/\s+/).filter(Boolean);
+  const found = state.products.filter(p => matches(p, f, terms));
+  if (f.sort && sorters[f.sort]) found.sort(sorters[f.sort]);
+  else if (f.need) found.sort(sorters.need);
+  state.filtered = found;
+  state.shown = 0;
+  const grid = $('grid');
+  grid.replaceChildren();
+  grid.setAttribute('aria-busy', 'false');
+  $('result-count').textContent = fmt.format(found.length) + ' ' + plural(found.length, 'модель', 'модели', 'моделей');
+  if (!found.length) grid.innerHTML = `<div class="empty"><b>Ничего не найдено</b>Измените запрос или <button type="button" class="link" data-reset>сбросьте фильтры</button></div>`;
   appendCards();
-  const activeFilters = [category, season, size, inStock, needs].filter(Boolean).length;
-  $('filter-toggle').textContent = activeFilters ? 'Фильтры · ' + activeFilters : 'Фильтры';
+  syncControls();
+  renderBulk();
+  writeHash();
 }
-let filtered=[], shown=0;
-function appendCards(){
-  const batch=filtered.slice(shown,shown+pageSize);
-  $('grid').insertAdjacentHTML('beforeend',batch.map((x,i)=>tile(x.model,x.lines,shown+i)).join(''));
-  shown+=batch.length;
-  $('pager').hidden=shown>=filtered.length;
+function appendCards() {
+  const batch = state.filtered.slice(state.shown, state.shown + PAGE);
+  $('grid').insertAdjacentHTML('beforeend', batch.map((p, i) => tile(p, state.shown + i)).join(''));
+  state.shown += batch.length;
 }
-new IntersectionObserver(entries=>{if(entries.some(e=>e.isIntersecting)) appendCards()},{rootMargin:'650px'}).observe($('pager'));
-const filterDialog = $('filter-dialog');
-const filterFields = ['category','season','size','in-stock','store-needs'].map($);
-let savedFilters = [];
-$('filter-toggle').onclick = () => {
-  savedFilters = filterFields.map(el => el.type === 'checkbox' ? el.checked : el.value);
-  filterDialog.returnValue = '';
-  filterDialog.showModal();
-};
-$('filter-reset').onclick = () => {
-  for (const el of filterFields) {
-    if (el.type === 'checkbox') el.checked = false;
-    else el.value = '';
+new IntersectionObserver(entries => {
+  if (entries.some(e => e.isIntersecting) && state.shown < state.filtered.length) appendCards();
+}, { rootMargin: '900px' }).observe($('pager'));
+
+// Массовое пополнение: все недостающие размеры из текущей выборки — по одной штуке.
+function bulkLines() {
+  const size = state.f.size;
+  const lines = [];
+  for (const p of state.filtered) for (const c of p.colors) for (const l of c.lines) {
+    if (l.store <= 0 && l.wh > 0 && (!size || l.size === size) && inCart(l.sku) < l.wh && !inCart(l.sku)) lines.push({ a: p.a, color: c.color, size: l.size, qty: 1 });
   }
-};
-filterDialog.onclose = () => {
-  if (filterDialog.returnValue !== 'apply') filterFields.forEach((el,i) => {
-    if (el.type === 'checkbox') el.checked = savedFilters[i];
-    else el.value = savedFilters[i];
-  });
+  return lines;
+}
+function bulkRoom() { return Math.max(0, MAX_LINES - state.cart.size); }
+function renderBulk() {
+  const button = $('bulk-add');
+  const show = canOrder() && stockFresh() && (state.f.need === 'size' || state.f.need === 'article');
+  const lines = show ? bulkLines() : [];
+  const n = Math.min(lines.length, bulkRoom());
+  button.hidden = !n;
+  button.textContent = `Добавить недостающие · ${fmt.format(n)} ${plural(n, 'позиция', 'позиции', 'позиций')}${n < lines.length ? ' из ' + fmt.format(lines.length) : ''}`;
+}
+$('bulk-add').onclick = async () => {
+  const all = bulkLines();
+  const lines = all.slice(0, bulkRoom());
+  if (!lines.length) return;
+  const models = new Set(lines.map(l => l.a)).size;
+  const capped = lines.length < all.length ? ` В одной заявке не больше ${MAX_LINES} позиций, поэтому берём первые по текущей сортировке — остальные добавьте следующей заявкой.` : '';
+  if (!await ask(`Добавить в корзину ${fmt.format(lines.length)} ${plural(lines.length, 'размер', 'размера', 'размеров')} по 1 шт. из ${fmt.format(models)} ${plural(models, 'модели', 'моделей', 'моделей')}?${capped} Количество можно поправить в корзине.`, 'Добавить')) return;
+  addToCart(lines);
+  notify(`В корзине +${fmt.format(lines.length)} шт.`);
   renderCatalog();
 };
-const photoDialog = $('photo-dialog');
-const frame = photoDialog.querySelector('.viewer-frame');
-// Scale and pan only the image. Coordinates are relative to the centre of the frame.
-function enablePhotoGestures(area, img) {
-  let scale = 1, x = 0, y = 0, previous = null, suppressClickUntil = 0;
-  const clamp = (n, limit) => Math.max(-limit, Math.min(limit, n));
-  function paint() {
-    x = clamp(x, area.clientWidth * (scale - 1) / 2);
-    y = clamp(y, area.clientHeight * (scale - 1) / 2);
-    img.style.transform = "translate(" + x + "px," + y + "px) scale(" + scale + ")";
-    area.classList.toggle('magnified', scale > 1);
-  }
-  function point(touches) {
-    const a = touches[0], b = touches[1] || a, r = area.getBoundingClientRect();
-    return { x: (a.clientX+b.clientX)/2-r.left-r.width/2, y: (a.clientY+b.clientY)/2-r.top-r.height/2,
-      distance: Math.hypot(a.clientX-b.clientX, a.clientY-b.clientY), count: touches.length };
-  }
-  area.addEventListener('touchstart', e => {
-    previous = point(e.touches);
-    if (e.touches.length >= 2) e.preventDefault();
-  }, {passive:false});
-  area.addEventListener('touchmove', e => {
-    const next = point(e.touches);
-    if (previous && next.count === previous.count && (next.count >= 2 || scale > 1)) {
-      e.preventDefault();
-      suppressClickUntil = performance.now() + 500;
-      const target = next.count >= 2 && previous.distance > 0 ? Math.max(1, Math.min(5, scale*next.distance/previous.distance)) : scale;
-      x = next.x - (previous.x-x)*target/scale;
-      y = next.y - (previous.y-y)*target/scale;
-      scale = target;
-      paint();
-    }
-    previous = next;
-  }, {passive:false});
-  function end(e) { previous = e.touches.length ? point(e.touches) : null; }
-  area.addEventListener('touchend',end);
-  area.addEventListener('touchcancel',end);
-  area.addEventListener('click', e => {
-    if (performance.now() < suppressClickUntil) { e.preventDefault(); e.stopPropagation(); }
-  }, true);
-  if (area === frame) area.addEventListener('dblclick', e => {
-    const r = area.getBoundingClientRect();
-    scale = scale > 1 ? 1 : 2;
-    x = scale === 1 ? 0 : r.left + r.width / 2 - e.clientX;
-    y = scale === 1 ? 0 : r.top + r.height / 2 - e.clientY;
-    paint();
-  });
-  return () => { scale = 1; x = y = 0; paint(); };
+
+function setFilter(changes) {
+  Object.assign(state.f, changes);
+  renderCatalog();
+  window.scrollTo({ top: Math.min(window.scrollY, $('catalog').offsetTop - 70), behavior: 'smooth' });
 }
-const resetViewer = enablePhotoGestures(frame, $('photo-full'));
-function showPhoto(img, title) {
-  $('photo-title').textContent = title;
-  $('photo-full').src = img.currentSrc || img.src;
-  $('photo-full').alt = img.alt;
-  photoDialog.showModal();
-  resetViewer();
+function resetFilters() { setFilter({ q: '', aud: '', kind: '', season: '', size: '', need: '', wh: false, sort: '' }); }
+{
+  let timer;
+  $('search').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => setFilter({ q: $('search').value }), 120); });
 }
-$('photo-close').onclick = () => photoDialog.close();
-let swipe = null;
-productDialog.addEventListener('touchstart', e => {
-  const blocked = e.target.closest('input,button,select,.magnified');
-  swipe = e.touches.length === 1 && !(blocked && !blocked.matches('.photo-open')) ?
-    { x:e.touches[0].clientX, y:e.touches[0].clientY } : null;
-  if (e.target.closest('.magnified')) swipe = null;
-}, {passive:true});
-productDialog.addEventListener('touchmove', e => {
-  if (swipe && (e.touches.length !== 1 || Math.abs(e.touches[0].clientY-swipe.y) > 45)) swipe = null;
-}, {passive:true});
-productDialog.addEventListener('touchend', e => {
-  if (swipe && !e.touches.length) {
-    const dx = e.changedTouches[0].clientX-swipe.x, dy = e.changedTouches[0].clientY-swipe.y;
-    if (dx > 80 && dx > 2*Math.abs(dy)) productDialog.close();
-  }
-  swipe = null;
+for (const id of ['season', 'size', 'need', 'sort']) $(id).addEventListener('change', () => setFilter({ [id]: $(id).value }));
+document.querySelector('.filters').addEventListener('click', event => {
+  const b = event.target.closest('button');
+  if (!b) return;
+  if (b.dataset.aud != null) setFilter({ aud: b.dataset.aud });
+  if (b.dataset.kind != null) setFilter({ kind: state.f.kind === b.dataset.kind ? '' : b.dataset.kind });
+  if (b.id === 'in-stock') setFilter({ wh: !state.f.wh });
+  if (b.id === 'reset') resetFilters();
 });
-productDialog.addEventListener('touchcancel', () => swipe = null);
-function openProduct(article, selected = null) {
-  const p = displayedProducts.get(article);
+$('summary').addEventListener('click', event => {
+  const b = event.target.closest('button.kpi');
+  if (!b) return;
+  if (b.dataset.goto) return showSection(b.dataset.goto);
+  if (b.dataset.need != null) setFilter(state.f.need === b.dataset.need ? { need: '' } : { need: b.dataset.need, wh: false });
+  else if (b.dataset.wh) setFilter(state.f.wh && !state.f.need ? { wh: false } : { wh: true, need: '' });
+});
+$('grid').addEventListener('click', event => {
+  if (event.target.closest('[data-reset]')) return resetFilters();
+  const card = event.target.closest('[data-product]');
+  if (card) openProduct(card.dataset.product);
+});
+
+// ---------- Карточка товара ----------
+let closingFromHistory = false;
+function openProduct(article, colorIndex = null) {
+  const p = state.byArticle.get(article);
   if (!p) return;
-  const sizeFilter = $('size').value;
-  const colorIndex = selected ?? Math.max(0, p.colors.findIndex(c => sizeFilter ? c.lines.some(line => line.size === sizeFilter) : c.photo != null));
-  const c = p.colors[colorIndex];
-  const savedScroll = productDialog.open ? productDialog.scrollTop : 0;
-  const heading = `<div class="modal-head"><div><h2 id="product-title" tabindex="-1" autofocus>${safe(p.n)}</h2></div>
-    <button class="close" type="button" aria-label="Закрыть" data-close>×</button></div>`;
-  const rows = c?.lines.map((line,i) => {
-    const inCart = state.cart.get(key(p.a,c.color,line.size))?.qty ?? 0;
-    const max = (line.warehouse || 0) - inCart;
-    const sizeName = safe(line.size || 'Единый');
-    const buying = canOrder() && max > 0 && currentStock();
-    return `<section class="size-card"><h3>Размер <strong>${sizeName}</strong></h3>
-      <dl><div><dt>Мой магазин</dt><dd>${qty(line.store)} шт.</dd></div><div><dt>Лиственная</dt><dd>${qty(line.warehouse)} шт.</dd></div></dl>
-      ${inCart ? '<p class="size-cart-count">В корзине · '+qty(inCart)+' шт.</p>' : ''}
-      ${buying ? `<div class="size-order"><div class="qty-stepper" role="group" aria-label="Количество к заказу"><button type="button" data-step="-1" aria-label="Уменьшить количество">−</button><input aria-label="Количество, размер ${sizeName}" data-qty="${i}" type="number" inputmode="numeric" min="1" max="${max}" step="1" required value="1"><button type="button" data-step="1" aria-label="Увеличить количество">+</button></div><button class="primary" aria-label="Добавить размер ${sizeName} в корзину" data-add="${i}" type="button">В корзину</button></div>` : ''}
-    </section>`;
-  }).join('');
-  productDialog.innerHTML = heading + `<div class="detail"><div class="photo detail-image">${photoMarkup(c?.photo ?? p.photo,'detail',p.n,true)}${(c?.photo ?? p.photo) != null ? '<button class="photo-open" aria-label="Увеличить фотографию"><span aria-hidden="true">⛶</span></button>' : ''}</div><div class="detail-copy">
-    <div class="chips" aria-label="Цвет">${p.colors.map((x,i) => `<button data-color="${i}" type="button" class="chip" aria-pressed="${i === colorIndex}">${safe(x.color || 'Без цвета')}</button>`).join('')}</div>
-    ${rows ? `<div class="size-grid">${rows}</div>` : '<p class="detail-note">Размеры появятся после выгрузки.</p>'}
-    ${c && c.photo == null && p.photo != null ? '<p class="detail-note">Показано фото модели.</p>' : ''}
-    <div class="product-code"><button type="button" data-copy class="copy" title="Скопировать артикул" aria-label="Скопировать артикул ${safe(p.a)}"><span>${safe(p.a)}</span><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 5H6a2 2 0 0 0-2 2v9"/></svg></button><span class="copy-status" role="status"></span></div><p class="inline-msg" role="status"></p>${canOrder()?'<button class="primary go-cart" data-cart>Открыть корзину</button>':""}</div></div>`;
-  if (!productDialog.open) productDialog.showModal();
-  const image = productDialog.querySelector('.detail-image img');
-  if (image) enablePhotoGestures(image.parentElement, image);
-  productDialog.scrollTop = savedScroll;
-  productDialog.onclick = event => {
-    const button = event.target.closest('button');
-    if (!button) return;
-    if (button.hasAttribute('data-copy')) {
-      const feedback = productDialog.querySelector('.copy-status');
-      if (navigator.clipboard) navigator.clipboard.writeText(p.a).then(() => feedback.textContent = 'Скопировано').catch(() => feedback.textContent = 'Не удалось скопировать');
-      else feedback.textContent = 'Не удалось скопировать';
-    }
-    if (button.matches('.photo-open')) showPhoto(productDialog.querySelector('.detail-image img'), p.n);
-    if (button.hasAttribute('data-step')) {
-      const input = button.parentElement.querySelector('input');
-      input.value = Math.min(Number(input.max), Math.max(1, (input.valueAsNumber || 0) + Number(button.dataset.step)));
-    }
-    if(button.hasAttribute('data-cart')) { productDialog.close();renderCart();cartDialog.showModal(); }
-    if (button.hasAttribute('data-close')) productDialog.close();
-    if (button.hasAttribute('data-color')) {
-      openProduct(article, Number(button.dataset.color));
-      productDialog.querySelector(`[data-color="${button.dataset.color}"]`)?.focus();
-    }
-    if (button.hasAttribute('data-add')) {
-      const input = productDialog.querySelector(`[data-qty="${button.dataset.add}"]`);
-      if (!input.reportValidity()) return;
-      const line = c.lines[Number(button.dataset.add)];
-      const sku = key(p.a,c.color,line.size);
-      const requested = input.valueAsNumber + (state.cart.get(sku)?.qty ?? 0);
-      if (!Number.isSafeInteger(requested) || requested < 1 || requested > line.warehouse) return;
-      state.cart.set(sku,{ a:p.a, color:c.color, size:line.size, qty:requested });
-      state.orderId = null;
-      saveCart();
-      updateCartCount();
-      openProduct(article,colorIndex);
-      const message = productDialog.querySelector('.inline-msg');
-      message.textContent = 'В корзине: ' + requested + ' шт.';
-      productDialog.querySelector(`[data-add="${button.dataset.add}"]`)?.focus({preventScroll:true});
-    }
+  const same = state.current?.article === article;
+  if (!same) state.draft = new Map();
+  const preferred = () => {
+    const size = state.f.size;
+    const index = p.colors.findIndex(c => size ? c.lines.some(l => l.size === size && (!canOrder() || l.store <= 0) && l.wh > 0)
+      : canOrder() && state.f.need ? c.lines.some(l => l.store <= 0 && l.wh > 0) : c.photo != null);
+    return Math.max(0, index);
   };
+  const ci = colorIndex ?? (same ? state.current.color : preferred());
+  state.current = { article, color: ci };
+  const c = p.colors[ci];
+  const photo = c?.photo ?? p.photo;
+  const position = state.filtered.findIndex(x => x.a === p.a);
+  const storeView = canOrder();
+  const ordering = storeView && stockFresh();
+  const rows = (c?.lines ?? []).map((l, i) => {
+    const has = inCart(l.sku);
+    const max = Math.max(0, (l.wh ?? 0) - has);
+    const draft = Math.min(state.draft.get(l.sku) ?? 0, max);
+    const need = storeView && l.store <= 0 && l.wh > 0;
+    return `<tr class="${need ? 'need' : ''}"><td>${safe(sizeName(l.size))}</td>
+      ${storeView ? `<td class="${numClass(l.store)}">${qty(l.store)}</td>` : ''}
+      <td class="${numClass(l.wh)}">${qty(l.wh)}${has ? `<span class="incart">в корзине ${has}</span>` : ''}</td>
+      ${ordering ? `<td>${max > 0 ? `<span class="stepper"><button type="button" data-step="-1" data-row="${i}" aria-label="Меньше, размер ${safe(sizeName(l.size))}">−</button><input type="number" inputmode="numeric" min="0" max="${max}" value="${draft}" data-row="${i}" aria-label="Количество, размер ${safe(sizeName(l.size))}"><button type="button" data-step="1" data-row="${i}" aria-label="Больше, размер ${safe(sizeName(l.size))}">+</button></span>` : '<span class="zero">—</span>'}</td>` : ''}
+    </tr>`;
+  }).join('');
+  const needCount = storeView ? (c?.lines ?? []).filter(l => l.store <= 0 && l.wh > 0 && inCart(l.sku) < l.wh).length : 0;
+  const swatches = p.colors.length > 1 || p.colors[0]?.color ? p.colors.map((x, i) => {
+    const src = photoSrc('thumb', x.photo);
+    const total = x.lines.reduce((t, l) => t + Math.max(0, l.wh ?? 0), 0);
+    return `<button type="button" class="swatch" data-color="${i}" aria-pressed="${i === ci}">${src ? `<img src="${safe(src)}" alt="" loading="lazy">` : '<span class="dot"></span>'}<span>${safe(x.color || 'Без цвета')}<small>Лиственная: ${fmt.format(total)}</small></span></button>`;
+  }).join('') : '';
+  productDialog.innerHTML = `
+    <div class="modal-head">
+      <div>
+        <h2 id="product-title" tabindex="-1">${safe(p.n)}</h2>
+        <div class="meta"><button type="button" class="copy code" data-copy="${safe(p.a)}" aria-label="Скопировать артикул ${safe(p.a)}">${safe(p.a)}${icons.copy}</button><span>· ${safe(p.c)}</span>${p.s ? `<span>· ${safe(p.s)}</span>` : ''}<span class="copy-status" role="status"></span></div>
+      </div>
+      <div class="head-actions">
+        <button type="button" class="icon-btn" data-share aria-label="Скопировать ссылку на товар" title="Ссылка на товар">${icons.link}</button>
+        <button type="button" class="icon-btn" data-nav="-1" aria-label="Предыдущий товар" ${position <= 0 ? 'disabled' : ''}>${icons.prev}</button>
+        <button type="button" class="icon-btn" data-nav="1" aria-label="Следующий товар" ${position < 0 || position >= state.filtered.length - 1 ? 'disabled' : ''}>${icons.next}</button>
+        <button type="button" class="close" data-close aria-label="Закрыть">×</button>
+      </div>
+    </div>
+    <div class="detail">
+      <div class="detail-media">
+        <div class="photo detail-image">${photoMarkup(photo, 'detail', p.n, true)}${photoSrc('detail', photo) ? '<button type="button" class="zoom" data-zoom aria-label="Увеличить фото"><span aria-hidden="true">⤢</span></button>' : ''}</div>
+        ${c && c.photo == null && p.photo != null ? '<p class="detail-note">Для этого цвета нет фото — показано фото модели.</p>' : ''}
+        ${swatches ? `<div class="swatches" role="group" aria-label="Цвет">${swatches}</div>` : ''}
+      </div>
+      <div class="detail-copy">
+        ${rows ? `<table class="matrix"><thead><tr><th>Размер</th>${storeView ? '<th>Мой магазин</th>' : ''}<th>Лиственная</th>${ordering ? '<th>Заказать</th>' : ''}</tr></thead><tbody>${rows}</tbody></table>
+          ${storeView ? '<p class="legend"><span><i></i>нет в магазине, есть на Лиственной</span></p>' : ''}`
+          : '<p class="detail-note">Размеры появятся после выгрузки из 1С.</p>'}
+        ${storeView && !stockFresh() ? '<p class="inline-msg bad">Остатки устарели — заказ откроется после следующей выгрузки из 1С.</p>' : ''}
+        ${ordering && rows ? `<div class="order-bar">
+            ${needCount ? `<button type="button" class="secondary" data-fill>Недостающие по 1 шт. (${needCount})</button>` : ''}
+            <button type="button" class="primary" data-add disabled>Выберите количество</button>
+          </div>` : ''}
+        <p class="inline-msg" role="status"></p>
+        ${storeView ? `<button type="button" class="link" data-cart>Открыть корзину · ${fmt.format(cartTotal())} шт.</button>` : ''}
+      </div>
+    </div>`;
+  updateDraftButton();
+  if (!productDialog.open) {
+    productDialog.showModal();
+    try { history.pushState({ modal: 'product' }, ''); } catch { /* без истории */ }
+  }
+  writeHash();
+  if (!same) { productDialog.scrollTop = 0; $('product-title').focus({ preventScroll: true }); }
+}
+function draftTotal() {
+  const p = state.byArticle.get(state.current?.article);
+  if (!p) return 0;
+  return [...state.draft.values()].reduce((t, n) => t + n, 0);
+}
+function updateDraftButton() {
+  const button = productDialog.querySelector('[data-add]');
+  if (!button) return;
+  const n = draftTotal();
+  button.disabled = !n;
+  button.textContent = n ? `Добавить в корзину · ${fmt.format(n)} шт.` : 'Выберите количество';
+}
+function currentLines() {
+  const p = state.byArticle.get(state.current.article);
+  return { p, c: p.colors[state.current.color] };
+}
+function setDraft(row, value) {
+  const { c } = currentLines();
+  const l = c.lines[row];
+  const max = Math.max(0, l.wh - inCart(l.sku));
+  const n = Math.max(0, Math.min(max, Number.isFinite(value) ? Math.trunc(value) : 0));
+  if (n) state.draft.set(l.sku, n); else state.draft.delete(l.sku);
+  const input = productDialog.querySelector(`input[data-row="${row}"]`);
+  if (input) input.value = n;
+  updateDraftButton();
+}
+productDialog.addEventListener('click', async event => {
+  if (event.target === productDialog) {
+    const r = productDialog.getBoundingClientRect();
+    if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) productDialog.close();
+    return;
+  }
+  const b = event.target.closest('button');
+  if (!b) return;
+  const message = productDialog.querySelector('.inline-msg');
+  if (b.hasAttribute('data-close')) productDialog.close();
+  else if (b.dataset.nav) {
+    const i = state.filtered.findIndex(x => x.a === state.current.article) + Number(b.dataset.nav);
+    if (state.filtered[i]) openProduct(state.filtered[i].a);
+  } else if (b.dataset.color) openProduct(state.current.article, Number(b.dataset.color));
+  else if (b.dataset.step) {
+    const row = Number(b.dataset.row);
+    const input = productDialog.querySelector(`input[data-row="${row}"]`);
+    setDraft(row, (input.valueAsNumber || 0) + Number(b.dataset.step));
+  } else if (b.hasAttribute('data-fill')) {
+    const { c } = currentLines();
+    c.lines.forEach((l, i) => { if (l.store <= 0 && l.wh > 0 && inCart(l.sku) < l.wh && !state.draft.get(l.sku)) setDraft(i, 1); });
+  } else if (b.hasAttribute('data-add')) {
+    const { p } = currentLines();
+    const lines = [];
+    for (const color of p.colors) for (const l of color.lines) {
+      const n = state.draft.get(l.sku);
+      if (n) lines.push({ a: p.a, color: color.color, size: l.size, qty: Math.min(n, l.wh - inCart(l.sku)) });
+    }
+    const added = addToCart(lines);
+    state.draft = new Map();
+    openProduct(p.a);
+    const msg = productDialog.querySelector('.inline-msg');
+    msg.className = 'inline-msg ok';
+    msg.textContent = `Добавлено ${fmt.format(added)} шт. В корзине всего ${fmt.format(cartTotal())} шт.`;
+    renderBulk();
+  } else if (b.dataset.copy) {
+    const ok = await copyText(b.dataset.copy);
+    productDialog.querySelector('.copy-status').textContent = ok ? ' Скопировано' : ' Не удалось скопировать';
+  } else if (b.hasAttribute('data-share')) {
+    const ok = await copyText(location.href);
+    message.className = 'inline-msg ' + (ok ? 'ok' : 'bad');
+    message.textContent = ok ? 'Ссылка на товар скопирована — её можно отправить в Telegram.' : 'Не удалось скопировать ссылку.';
+  } else if (b.hasAttribute('data-zoom')) {
+    const img = productDialog.querySelector('.detail-image img');
+    showPhoto(img.currentSrc || img.src, state.byArticle.get(state.current.article).n);
+  } else if (b.hasAttribute('data-cart')) {
+    productDialog.close();
+    openCart();
+  }
+});
+productDialog.addEventListener('change', event => {
+  const input = event.target.closest('input[data-row]');
+  if (input) setDraft(Number(input.dataset.row), input.valueAsNumber);
+});
+productDialog.addEventListener('input', event => {
+  const input = event.target.closest('input[data-row]');
+  if (input && Number.isFinite(input.valueAsNumber)) {
+    const { c } = currentLines();
+    const l = c.lines[Number(input.dataset.row)];
+    const n = Math.max(0, Math.min(l.wh - inCart(l.sku), Math.trunc(input.valueAsNumber)));
+    if (n) state.draft.set(l.sku, n); else state.draft.delete(l.sku);
+    updateDraftButton();
+  }
+});
+productDialog.addEventListener('keydown', event => {
+  if (event.target.matches('input')) return;
+  if (event.key === 'ArrowLeft') productDialog.querySelector('[data-nav="-1"]:not(:disabled)')?.click();
+  if (event.key === 'ArrowRight') productDialog.querySelector('[data-nav="1"]:not(:disabled)')?.click();
+});
+productDialog.addEventListener('close', () => {
+  state.current = null;
+  state.draft = new Map();
+  writeHash();
+  if (!closingFromHistory && history.state?.modal === 'product') { try { history.back(); } catch { /* ignore */ } }
+  closingFromHistory = false;
+});
+window.addEventListener('popstate', () => {
+  if (productDialog.open) { closingFromHistory = true; productDialog.close(); }
+});
+// Свайп вправо закрывает карточку на телефоне.
+{
+  let start = null;
+  productDialog.addEventListener('touchstart', e => {
+    start = e.touches.length === 1 && !e.target.closest('input,.stepper,.swatches,.matrix') ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+  }, { passive: true });
+  productDialog.addEventListener('touchend', e => {
+    if (!start) return;
+    const dx = e.changedTouches[0].clientX - start.x, dy = e.changedTouches[0].clientY - start.y;
+    if (Math.abs(dx) > 90 && Math.abs(dx) > 2.2 * Math.abs(dy)) {
+      const next = productDialog.querySelector(`[data-nav="${dx < 0 ? 1 : -1}"]:not(:disabled)`);
+      if (next) next.click(); else if (dx > 0) productDialog.close();
+    }
+    start = null;
+  }, { passive: true });
 }
 
+// ---------- Просмотр фото: колесо, щипок, двойной тап, перетаскивание ----------
+const viewer = { scale: 1, x: 0, y: 0, pointers: new Map(), last: null, tap: 0 };
+const frame = photoDialog.querySelector('.viewer-frame');
+const full = $('photo-full');
+function paintViewer() {
+  const limitX = frame.clientWidth * (viewer.scale - 1) / 2, limitY = frame.clientHeight * (viewer.scale - 1) / 2;
+  viewer.x = Math.max(-limitX, Math.min(limitX, viewer.x));
+  viewer.y = Math.max(-limitY, Math.min(limitY, viewer.y));
+  full.style.transform = `translate(${viewer.x}px, ${viewer.y}px) scale(${viewer.scale})`;
+  frame.classList.toggle('magnified', viewer.scale > 1);
+}
+function zoomAt(scale, cx, cy) {
+  const r = frame.getBoundingClientRect();
+  const px = cx - r.left - r.width / 2, py = cy - r.top - r.height / 2;
+  const target = Math.max(1, Math.min(5, scale));
+  viewer.x = px - (px - viewer.x) * target / viewer.scale;
+  viewer.y = py - (py - viewer.y) * target / viewer.scale;
+  viewer.scale = target;
+  paintViewer();
+}
+function showPhoto(src, title) {
+  $('photo-title').textContent = title;
+  full.src = src;
+  Object.assign(viewer, { scale: 1, x: 0, y: 0 });
+  paintViewer();
+  photoDialog.showModal();
+}
+frame.addEventListener('wheel', e => { e.preventDefault(); zoomAt(viewer.scale * (e.deltaY < 0 ? 1.2 : 1 / 1.2), e.clientX, e.clientY); }, { passive: false });
+frame.addEventListener('dblclick', e => zoomAt(viewer.scale > 1 ? 1 : 2.5, e.clientX, e.clientY));
+frame.addEventListener('pointerdown', e => {
+  frame.setPointerCapture(e.pointerId);
+  viewer.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (e.pointerType === 'touch' && viewer.pointers.size === 1) {
+    const now = performance.now();
+    if (now - viewer.tap < 300) zoomAt(viewer.scale > 1 ? 1 : 2.5, e.clientX, e.clientY);
+    viewer.tap = now;
+  }
+});
+frame.addEventListener('pointermove', e => {
+  if (!viewer.pointers.has(e.pointerId)) return;
+  const before = [...viewer.pointers.values()];
+  viewer.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  const after = [...viewer.pointers.values()];
+  if (after.length === 2) {
+    const d0 = Math.hypot(before[0].x - before[1].x, before[0].y - before[1].y);
+    const d1 = Math.hypot(after[0].x - after[1].x, after[0].y - after[1].y);
+    if (d0 > 0) zoomAt(viewer.scale * d1 / d0, (after[0].x + after[1].x) / 2, (after[0].y + after[1].y) / 2);
+  } else if (after.length === 1 && viewer.scale > 1) {
+    viewer.x += after[0].x - before[0].x; viewer.y += after[0].y - before[0].y; paintViewer();
+  }
+});
+for (const type of ['pointerup', 'pointercancel']) frame.addEventListener(type, e => viewer.pointers.delete(e.pointerId));
+$('photo-close').onclick = () => photoDialog.close();
+
+// ---------- Корзина ----------
+function available(line) {
+  const p = state.byArticle.get(line.a);
+  const sku = key(line.a, line.color, line.size);
+  for (const c of p?.colors ?? []) for (const l of c.lines) if (l.sku === sku) return Math.max(0, l.wh ?? 0);
+  return 0;
+}
+function openCart() { renderCart(); cartDialog.showModal(); }
 function renderCart() {
   const lines = [...state.cart.values()];
-  const total = lines.reduce((n, line) => n + line.qty, 0);
-  cartDialog.innerHTML = `<div class="modal-head"><div><span class="article">Лиственная → ${safe(state.user.name)}</span><h2 id="cart-title">Корзина пополнения</h2></div>
-    <button class="close" aria-label="Закрыть" type="button" data-close>×</button></div><div class="cart-body">
-    ${lines.length ? `<div class="table-wrap"><table><thead><tr><th>Товар</th><th>Цвет / размер</th><th>Шт.</th><th><span class="sr">Действие</span></th></tr></thead><tbody>
-      ${lines.map((line,i) => `<tr><td><span class="article">${safe(line.a)}</span><br>${safe(state.products.get(line.a)?.n || '')}</td>
-        <td>${safe(line.color || '—')} / ${safe(line.size || 'единый')}</td>
-        <td><input aria-label="Количество для ${safe(line.a)}, ${safe(line.size)}" data-change="${i}" type="number" min="1" max="999999" step="1" inputmode="numeric" value="${line.qty}"></td>
-        <td><button class="secondary small" type="button" data-remove="${i}">Убрать</button></td></tr>`).join('')}
-      </tbody></table></div><div class="cart-foot"><b id="cart-total">${lines.length} поз. · ${total} шт.</b><button class="primary" id="submit-order" type="button">${state.demo ? 'Отправить тестовую заявку' : 'Отправить заявку'}</button></div>
-      <p id="cart-error" class="inline-msg danger" role="status"></p>` : '<p class="empty">Добавьте товары из каталога.</p>'}</div>`;
-  cartDialog.onchange = event => {
-    if (event.target.dataset.change == null) return;
-    const line = lines[Number(event.target.dataset.change)];
-    if (!event.target.reportValidity()) { event.target.value = line.qty; return; }
-    const maximum = available(line);
-    if (event.target.valueAsNumber > maximum) {
-      $('cart-error').textContent = 'На Лиственной доступно ' + maximum + ' шт. для ' + line.a;
-      event.target.value = line.qty;
-      return;
-    }
-    line.qty = event.target.valueAsNumber;
-    state.orderId = null;
-    saveCart();
-    updateCartCount();
-    $('cart-error').textContent = '';
-    $('cart-total').textContent = lines.length + ' поз. · ' + lines.reduce((n, item) => n + item.qty, 0) + ' шт.';
-  };
-  cartDialog.onclick = event => {
-    const button = event.target.closest('button');
-    if (!button) return;
-    if (button.hasAttribute('data-close')) cartDialog.close();
-    if (button.hasAttribute('data-remove')) {
-      const line = lines[Number(button.dataset.remove)];
-      state.cart.delete(key(line.a,line.color,line.size));
-      state.orderId = null;
-      saveCart();
-      updateCartCount();
-      renderCart();
-    }
-    if (button.id === 'submit-order') void submitCart(button);
-  };
+  const groups = new Map();
+  for (const line of lines) {
+    const id = line.a + '\u0000' + line.color.trim().toLowerCase();
+    if (!groups.has(id)) groups.set(id, []);
+    groups.get(id).push(line);
+  }
+  const total = cartTotal();
+  const body = lines.length ? [...groups.values()].map(group => {
+    const first = group[0];
+    const p = state.byArticle.get(first.a);
+    const color = p?.colors.find(c => c.color.trim().toLowerCase() === first.color.trim().toLowerCase());
+    const src = photoSrc('thumb', color?.photo ?? p?.photo);
+    group.sort((x, y) => sizeOrder(x.size, y.size));
+    return `<div class="cart-group">
+      ${src ? `<img class="thumb" src="${safe(src)}" alt="" loading="lazy">` : '<span class="thumb empty-thumb">нет фото</span>'}
+      <div><h3>${safe(p?.n || first.a)}</h3><div class="meta"><span class="code">${safe(first.a)}</span><span>· ${safe(first.color || 'без цвета')}</span></div>
+      <div class="cart-lines">${group.map(line => {
+        const sku = key(line.a, line.color, line.size);
+        const max = available(line);
+        return `<div class="cart-line ${line.qty > max ? 'over' : ''}" data-sku="${safe(sku)}">
+          <span class="what">Размер <b>${safe(sizeName(line.size))}</b><br><small>${line.qty > max ? `На Лиственной только ${max} шт.` : `На Лиственной ${max} шт.`}</small></span>
+          <span class="stepper"><button type="button" data-cstep="-1" aria-label="Меньше">−</button><input type="number" inputmode="numeric" min="1" max="${Math.max(1, max)}" value="${line.qty}" aria-label="Количество, ${safe(line.a)}, размер ${safe(sizeName(line.size))}"><button type="button" data-cstep="1" aria-label="Больше">+</button></span>
+          <button type="button" class="remove" data-remove aria-label="Убрать размер ${safe(sizeName(line.size))}">${icons.trash}</button>
+        </div>`;
+      }).join('')}</div></div></div>`;
+  }).join('') + `<label class="cart-comment">Комментарий для склада<textarea id="cart-note" maxlength="500" placeholder="Например: срочно к выходным, витрина">${safe(state.comment)}</textarea></label>`
+    : '<div class="empty"><b>Корзина пуста</b>Откройте товар и выберите размеры, или включите «Нет в магазине» в сводке.</div>';
+  cartDialog.innerHTML = `
+    <div class="modal-head"><div><div class="meta">Лиственная → ${safe(state.user.name)}</div><h2 id="cart-title">Заявка на пополнение</h2></div>
+      <button class="close" type="button" data-close aria-label="Закрыть">×</button></div>
+    <div class="cart-body">${body}<p id="cart-error" class="inline-msg bad" role="status">${lines.length > MAX_LINES ? `В одной заявке можно отправить не больше ${MAX_LINES} позиций, сейчас ${lines.length}. Уберите лишнее или отправьте частями.` : ''}</p></div>
+    ${lines.length ? `<div class="cart-foot">
+      <span class="total">${fmt.format(total)} шт.<small>${lines.length} ${plural(lines.length, 'позиция', 'позиции', 'позиций')} · ${new Set(lines.map(l => l.a)).size} ${plural(new Set(lines.map(l => l.a)).size, 'модель', 'модели', 'моделей')}</small></span>
+      <button type="button" class="ghost small" data-clear>Очистить</button>
+      <button type="button" class="secondary small" data-export>Скачать для Excel</button>
+      <button type="button" class="primary" id="submit-order" ${lines.length > MAX_LINES ? 'disabled' : ''}>${state.demo ? 'Отправить тестовую заявку' : 'Отправить заявку'}</button>
+    </div>` : ''}`;
 }
-function available(line) {
-  const sku = key(line.a,line.color,line.size);
-  const p = state.products.get(line.a);
-  return Math.max(0, p?.colors.flatMap(c => c.lines.map(size => ({ ...size, color: c.color })))
-    .find(x => key(line.a,x.color,x.size) === sku)?.warehouse ?? 0);
+function cartLineFrom(el) { return state.cart.get(el.closest('[data-sku]').dataset.sku); }
+function setCartQty(line, value) {
+  const max = available(line);
+  const n = Math.max(1, Math.trunc(value) || 1);
+  line.qty = Math.min(n, Math.max(1, max));
+  state.orderId = null;
+  saveCart(); updateCartCount(); renderCart();
+  if (n > max) $('cart-error').textContent = `На Лиственной доступно ${max} шт. (${line.a}, ${sizeName(line.size)})`;
 }
+cartDialog.addEventListener('click', async event => {
+  if (event.target === cartDialog) {
+    const r = cartDialog.getBoundingClientRect();
+    if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) cartDialog.close();
+    return;
+  }
+  const b = event.target.closest('button');
+  if (!b) return;
+  if (b.hasAttribute('data-close')) cartDialog.close();
+  else if (b.dataset.cstep) { const line = cartLineFrom(b); setCartQty(line, line.qty + Number(b.dataset.cstep)); }
+  else if (b.hasAttribute('data-remove')) {
+    state.cart.delete(b.closest('[data-sku]').dataset.sku);
+    state.orderId = null; saveCart(); updateCartCount(); renderCart();
+  } else if (b.hasAttribute('data-clear')) {
+    if (!await ask('Очистить корзину полностью?', 'Очистить')) return;
+    state.cart.clear(); state.orderId = null; state.comment = ''; saveCart(); updateCartCount(); renderCart();
+  } else if (b.hasAttribute('data-export')) {
+    const lines = [...state.cart.values()].sort((x, y) => collator.compare(x.a, y.a) || collator.compare(x.color, y.color) || sizeOrder(x.size, y.size));
+    download(`PEAK-корзина-${state.user.store}-${fileStamp()}.csv`, csv([['Артикул', 'Наименование', 'Цвет', 'Размер', 'Количество', 'На Лиственной'],
+      ...lines.map(l => [l.a, state.byArticle.get(l.a)?.n ?? '', l.color, sizeName(l.size), l.qty, available(l)])]));
+  } else if (b.id === 'submit-order') submitCart(b);
+});
+cartDialog.addEventListener('change', event => {
+  if (event.target.id === 'cart-note') { state.comment = event.target.value.slice(0, 500); saveCart(); return; }
+  const input = event.target.closest('[data-sku] input');
+  if (input) setCartQty(cartLineFrom(input), input.valueAsNumber);
+});
+cartDialog.addEventListener('input', event => {
+  if (event.target.id === 'cart-note') { state.comment = event.target.value.slice(0, 500); saveCart(); }
+});
 const demoOrdersKey = 'peak-demo-orders-v1';
 async function submitCart(button) {
   const lines = [...state.cart.values()];
-  const changed = lines.find(line => line.qty > available(line));
-  if (changed || !currentStock()) {
-    $('cart-error').textContent = changed ? 'Проверьте остаток товара ' + changed.a : 'Дождитесь следующей выгрузки остатков.';
+  const short = lines.find(line => line.qty > available(line));
+  if (short || !stockFresh()) {
+    $('cart-error').textContent = short ? `Остаток изменился: ${short.a}, размер ${sizeName(short.size)} — доступно ${available(short)} шт.` : 'Остатки устарели. Дождитесь следующей выгрузки из 1С.';
     return;
   }
-  button.disabled = true;
-  const controls = [...cartDialog.querySelectorAll('input,[data-remove]')];
-  controls.forEach(control => { control.disabled = true; });
+  const controls = [...cartDialog.querySelectorAll('button,input,textarea')];
+  controls.forEach(c => { c.disabled = true; });
+  button.textContent = 'Отправляю…';
   state.orderId ||= crypto.randomUUID();
   saveCart();
+  const comment = state.comment.trim();
   try {
     if (state.demo) {
       const orders = storageRead(demoOrdersKey, []);
-      const order = { id:state.orderId, store:state.user.store, name:state.user.name, items:lines, created:new Date().toISOString(), status:'new' };
-      if (!orders.some(x => x.id === order.id) && !storageWrite(demoOrdersKey,[order,...orders].slice(0,100))) throw new Error('Браузер не смог сохранить тестовую заявку.');
-    } else await api('/api/orders',{ id:state.orderId, items:lines });
-    state.cart.clear();
-    state.orderId = null;
-    saveCart();
-    updateCartCount();
+      const order = { id: state.orderId, store: state.user.store, name: state.user.name, items: lines, comment, created: new Date().toISOString(), status: 'new' };
+      if (!orders.some(x => x.id === order.id) && !storageWrite(demoOrdersKey, [order, ...orders].slice(0, 200))) throw new Error('Браузер не смог сохранить тестовую заявку.');
+    } else await api('/api/orders', { id: state.orderId, items: lines.map(({ a, color, size, qty: n }) => ({ a, color, size, qty: n })), ...(comment ? { comment } : {}) });
+    state.cart.clear(); state.orderId = null; state.comment = '';
+    saveCart(); updateCartCount();
     cartDialog.close();
+    state.of.status = 'new';
     showSection('orders');
-    notify(state.demo ? 'Тестовая заявка создана' : 'Заявка отправлена');
+    renderCatalog();
+    notify(state.demo ? 'Тестовая заявка создана' : 'Заявка отправлена на Лиственную');
   } catch (err) {
     $('cart-error').textContent = err.message;
-    button.disabled = false;
-    controls.forEach(control => { control.disabled = false; });
+    controls.forEach(c => { c.disabled = false; });
+    button.textContent = state.demo ? 'Отправить тестовую заявку' : 'Отправить заявку';
   }
 }
 
-function renderOrders(orders) {
-  $('order-list').innerHTML = orders.map(order => `<details class="order" data-order="${safe(order.id)}"><summary><span><b>${safe(order.name)}</b>
-    <small>${date(order.created)} МСК · ${order.items.length} поз. · ${order.items.reduce((n,item) => n + item.qty, 0)} шт.</small></span>
-    <span class="status ${safe(order.status)}">${safe(statusLabels[order.status])}</span></summary><div class="order-body">
-    <div class="table-wrap"><table><thead><tr><th>Артикул</th><th>Цвет</th><th>Размер</th><th>Шт.</th></tr></thead><tbody>
-    ${order.items.map(line => `<tr><td>${safe(line.a)}</td><td>${safe(line.color || '—')}</td><td>${safe(line.size || '—')}</td><td>${line.qty}</td></tr>`).join('')}</tbody></table></div>
-    ${order.document ? '<p>Документ 1С: ' + safe(order.document) + '</p>' : ''}
-    ${order.note ? '<p>' + safe(order.note) + '</p>' : ''}
-    ${state.user.role === 'warehouse' && order.status === 'new' ? '<div class="order-action"><input aria-label="Номер перемещения или причина отказа" maxlength="100" placeholder="Номер перемещения или причина отказа"><button class="primary small" data-status="done" type="button">Перемещение оформлено</button><button class="secondary small" data-status="rejected" type="button">Отклонить</button><p class="inline-msg danger" role="status"></p></div>' : ''}
-    </div></details>`).join('') || '<p class="empty">Заявок пока нет.</p>';
+// ---------- Заявки ----------
+function orderQty(order) { return order.items.reduce((n, i) => n + i.qty, 0); }
+function whNow(line) { return hasStock() ? available(line) : null; }
+function sortedItems(order) {
+  return [...order.items].sort((x, y) => collator.compare(x.a, y.a) || collator.compare(x.color, y.color) || sizeOrder(x.size, y.size));
 }
-async function loadOrders() {
+function renderOrders() {
+  const all = state.orders;
+  const counts = { new: 0, done: 0, rejected: 0 };
+  for (const o of all) counts[o.status] = (counts[o.status] ?? 0) + 1;
+  $('order-status').innerHTML = [['new', 'Новые'], ['done', 'Оформлены'], ['rejected', 'Отклонены'], ['all', 'Все']]
+    .map(([id, label]) => `<button type="button" data-ostatus="${id}" aria-pressed="${state.of.status === id}">${label}<b>${fmt.format(id === 'all' ? all.length : counts[id])}</b></button>`).join('');
+  const stores = [...new Map(all.map(o => [o.store, o.name])).entries()].sort((a, b) => collator.compare(a[1], b[1]));
+  $('order-store-pick').hidden = !isWarehouse() || stores.length < 2;
+  const select = $('order-store');
+  select.replaceChildren(new Option('Все магазины', ''), ...stores.map(([id, name]) => new Option(name, id)));
+  select.value = state.of.store;
+  const q = normalize(state.of.q);
+  const shown = all.filter(o => (state.of.status === 'all' || o.status === state.of.status) && (!state.of.store || o.store === state.of.store) &&
+    (!q || normalize([o.document, o.note, o.comment, o.name, ...o.items.map(i => i.a)].join(' ')).includes(q)));
+  const warehouseView = isWarehouse();
+  $('order-list').innerHTML = shown.map(order => {
+    const items = sortedItems(order);
+    return `<details class="order" data-order="${safe(order.id)}" ${shown.length === 1 ? 'open' : ''}>
+      <summary><div><b>${safe(order.name)}</b><small>${clock.format(new Date(order.created))} МСК · ${order.items.length} поз. · ${fmt.format(orderQty(order))} шт.${order.document ? ' · ' + safe(order.document) : ''}</small></div>
+      <span class="status ${safe(order.status)}">${safe(statusLabels[order.status] ?? order.status)}</span></summary>
+      <div class="order-body">
+        <div class="order-meta">
+          ${order.comment ? `<p class="quote">${safe(order.comment)}</p>` : ''}
+          ${order.document ? `<p>Документ 1С: <b>${safe(order.document)}</b>${order.processed ? ' · ' + clock.format(new Date(order.processed)) + ' МСК' : ''}</p>` : ''}
+          ${order.note ? `<p>Причина отказа: ${safe(order.note)}</p>` : ''}
+        </div>
+        <div class="table-wrap"><table class="data"><thead><tr><th>Артикул</th><th>Наименование</th><th>Цвет</th><th>Размер</th><th class="n">Шт.</th>${warehouseView && order.status === 'new' && hasStock() ? '<th class="n">На Лиственной</th>' : ''}</tr></thead><tbody>
+        ${items.map(line => {
+          const now = warehouseView && order.status === 'new' ? whNow(line) : null;
+          return `<tr><td class="code">${safe(line.a)}</td><td class="nm">${safe(state.byArticle.get(line.a)?.n ?? '')}</td><td>${safe(line.color || '—')}</td><td>${safe(sizeName(line.size))}</td><td class="n">${line.qty}</td>${now != null ? `<td class="n ${now < line.qty ? 'short' : ''}">${now}</td>` : ''}</tr>`;
+        }).join('')}</tbody></table></div>
+        <div class="order-tools">
+          <button type="button" class="secondary small" data-print>Печать сборочного листа</button>
+          <button type="button" class="secondary small" data-ocsv>Скачать для Excel</button>
+          <button type="button" class="secondary small" data-ocopy>Скопировать списком</button>
+          ${canOrder() ? '<button type="button" class="secondary small" data-repeat>Повторить заявку</button>' : ''}
+        </div>
+        ${warehouseView && order.status === 'new' ? `<div class="order-action">
+          <input type="text" maxlength="100" placeholder="Номер перемещения в 1С или причина отказа" aria-label="Номер перемещения или причина отказа">
+          <button class="primary small" data-status="done" type="button">Перемещение оформлено</button>
+          <button class="secondary small" data-status="rejected" type="button">Отклонить</button>
+          <p class="inline-msg bad" role="status"></p></div>` : ''}
+      </div></details>`;
+  }).join('') || `<div class="empty"><b>${all.length ? 'Нет заявок с такими условиями' : 'Заявок пока нет'}</b>${canOrder() && !all.length ? 'Соберите корзину в каталоге и отправьте заявку на Лиственную.' : ''}</div>`;
+  updateOrdersBadge();
+}
+function updateOrdersBadge() {
+  const count = isWarehouse() ? state.orders.filter(o => o.status === 'new').length : 0;
+  $('orders-badge').hidden = !count;
+  $('orders-badge').textContent = count;
+  document.title = (count ? `(${count}) ` : '') + 'PEAK — каталог и пополнение';
+}
+async function loadOrders({ quiet = false } = {}) {
   const version = ++orderRead;
-  $('refresh-orders').disabled = true;
+  if (!quiet) $('refresh-orders').disabled = true;
   try {
     const orders = state.demo
-      ? storageRead(demoOrdersKey, []).filter(order => !canOrder() || order.store === state.user.store)
+      ? storageRead(demoOrdersKey, []).filter(o => !canOrder() || o.store === state.user.store)
       : (await api('/api/orders')).orders;
-    if (version === orderRead) renderOrders(orders);
+    if (version !== orderRead) return;
+    state.orders = orders;
+    state.ordersLoaded = true;
+    const typing = $('order-list').contains(document.activeElement) && document.activeElement.matches('input');
+    if (!quiet || (state.active !== 'orders') || !typing) renderOrders(); else updateOrdersBadge();
+    if (isWarehouse()) renderSummary();
   } catch (err) {
-    if (version === orderRead) $('order-list').innerHTML = '<p class="empty">' + safe(err.message) + '</p>';
+    if (version === orderRead && !quiet) $('order-list').innerHTML = `<div class="empty">${safe(err.message)}</div>`;
   } finally {
     if (version === orderRead) $('refresh-orders').disabled = false;
   }
 }
-$('order-list').onclick = async event => {
-  const button = event.target.closest('[data-status]');
-  if (!button) return;
-  const row = button.closest('[data-order]');
-  const form = button.closest('.order-action');
-  const text = form.querySelector('input').value.trim();
-  const message = form.querySelector('[role=status]');
-  const status = button.dataset.status;
-  if (!text) {
-    message.textContent = status === 'done' ? 'Укажите номер перемещения в 1С.' : 'Укажите причину отказа.';
+function printOrder(order) {
+  const items = sortedItems(order);
+  $('print-area').innerHTML = `<h1>Сборочный лист: Лиственная → ${safe(order.name)}</h1>
+    <p>Заявка от ${clock.format(new Date(order.created))} МСК · ${items.length} поз. · ${fmt.format(orderQty(order))} шт. · № ${safe(order.id.slice(0, 8))}${order.document ? ' · Документ 1С: ' + safe(order.document) : ''}</p>
+    ${order.comment ? `<p>Комментарий: ${safe(order.comment)}</p>` : ''}
+    <table><thead><tr><th>№</th><th>Артикул</th><th>Наименование</th><th>Цвет</th><th>Размер</th><th class="n">Шт.</th><th>Собрано</th></tr></thead>
+    <tbody>${items.map((l, i) => `<tr><td>${i + 1}</td><td>${safe(l.a)}</td><td>${safe(state.byArticle.get(l.a)?.n ?? '')}</td><td>${safe(l.color)}</td><td>${safe(sizeName(l.size))}</td><td class="n">${l.qty}</td><td class="box"></td></tr>`).join('')}</tbody>
+    <tfoot><tr><td colspan="5">Итого</td><td class="n">${fmt.format(orderQty(order))}</td><td></td></tr></tfoot></table>
+    <div class="sign"><span>Собрал: ____________________</span><span>Проверил: ____________________</span></div>`;
+  window.print();
+}
+$('order-list').addEventListener('click', async event => {
+  const b = event.target.closest('button');
+  if (!b) return;
+  const box = b.closest('[data-order]');
+  const order = state.orders.find(o => o.id === box.dataset.order);
+  if (!order) return;
+  if (b.hasAttribute('data-print')) return printOrder(order);
+  if (b.hasAttribute('data-ocsv')) {
+    return download(`PEAK-заявка-${order.store}-${order.created.slice(0, 10)}.csv`, csv([['Артикул', 'Наименование', 'Цвет', 'Размер', 'Количество'],
+      ...sortedItems(order).map(l => [l.a, state.byArticle.get(l.a)?.n ?? '', l.color, sizeName(l.size), l.qty])]));
+  }
+  if (b.hasAttribute('data-ocopy')) {
+    const text = `Заявка ${order.name}, ${clock.format(new Date(order.created))}\n` + sortedItems(order).map(l => `${l.a} ${l.color} ${sizeName(l.size)} — ${l.qty} шт.`).join('\n') + `\nИтого: ${orderQty(order)} шт.`;
+    return notify(await copyText(text) ? 'Список скопирован' : 'Не удалось скопировать');
+  }
+  if (b.hasAttribute('data-repeat')) {
+    if (!stockFresh()) return notify('Остатки устарели — дождитесь выгрузки из 1С');
+    let skipped = 0;
+    const lines = [];
+    for (const item of order.items) {
+      const room = available(item) - inCart(key(item.a, item.color, item.size));
+      const n = Math.min(item.qty, room);
+      if (n > 0) lines.push({ ...item, qty: n });
+      if (n < item.qty) skipped += item.qty - Math.max(0, n);
+    }
+    const added = addToCart(lines);
+    notify(added ? `В корзину добавлено ${added} шт.${skipped ? `, ${skipped} шт. нет на Лиственной` : ''}` : 'Этих товаров сейчас нет на Лиственной');
+    if (added) openCart();
     return;
   }
-  const actions = [...form.querySelectorAll('button')];
+  const status = b.dataset.status;
+  if (!status) return;
+  const form = b.closest('.order-action');
+  const text = form.querySelector('input').value.trim();
+  const message = form.querySelector('[role=status]');
+  if (!text) { message.textContent = status === 'done' ? 'Укажите номер перемещения в 1С.' : 'Укажите причину отказа.'; form.querySelector('input').focus(); return; }
+  const actions = [...form.querySelectorAll('button,input')];
   actions.forEach(x => { x.disabled = true; });
   const body = { status, document: status === 'done' ? text : '', note: status === 'rejected' ? text : '' };
   try {
     if (state.demo) {
       const orders = storageRead(demoOrdersKey, []);
-      if (!storageWrite(demoOrdersKey,orders.map(order => order.id === row.dataset.order ? { ...order, ...body } : order))) throw new Error('Браузер не смог сохранить изменения.');
-    } else await api('/api/orders/' + row.dataset.order,body,'PATCH');
+      if (!storageWrite(demoOrdersKey, orders.map(o => o.id === order.id ? { ...o, ...body, processed: new Date().toISOString() } : o))) throw new Error('Браузер не смог сохранить изменения.');
+    } else await api('/api/orders/' + order.id, body, 'PATCH');
+    notify(status === 'done' ? 'Заявка закрыта: перемещение оформлено' : 'Заявка отклонена');
     void loadOrders();
   } catch (err) { message.textContent = err.message; actions.forEach(x => { x.disabled = false; }); }
-};
+});
+$('order-status').addEventListener('click', event => {
+  const b = event.target.closest('[data-ostatus]');
+  if (b) { state.of.status = b.dataset.ostatus; renderOrders(); }
+});
+$('order-store').addEventListener('change', event => { state.of.store = event.target.value; renderOrders(); });
+{
+  let timer;
+  $('order-search').addEventListener('input', event => { clearTimeout(timer); timer = setTimeout(() => { state.of.q = event.target.value; renderOrders(); }, 150); });
+}
+
+// ---------- Разделы, роли, свежесть ----------
 function showSection(section) {
-  if(state.user?.role==='warehouse') section='orders';
+  if (section === 'catalog' && isWarehouse() && state.stockDenied) section = 'orders';
   state.active = section;
-  for (const name of ['catalog','orders']) {
+  for (const name of ['catalog', 'orders']) {
     $(name).hidden = name !== section;
-    if (name === section) $(name + '-tab').setAttribute('aria-current','page');
+    if (name === section) $(name + '-tab').setAttribute('aria-current', 'page');
     else $(name + '-tab').removeAttribute('aria-current');
   }
   if (section === 'orders' && state.user) void loadOrders();
+  writeHash();
+  window.scrollTo({ top: 0 });
+}
+function updateAccount() {
+  $('demo-role').hidden = !state.demo;
+  $('account-name').textContent = !state.demo && state.user ? state.user.name : '';
+  $('cart-button').hidden = !canOrder();
+  $('catalog-tab').hidden = isWarehouse() && state.stockDenied;
+  $('orders-title').textContent = canOrder() ? 'Заявки моего магазина' : 'Заявки магазинов на Лиственную';
+  $('in-stock').hidden = false;
+  if (!canOrder() && state.f.need && state.f.need !== 'negative') state.f.need = '';
+}
+function renderSync() {
+  const pill = $('sync');
+  const text = pill.querySelector('span');
+  pill.hidden = !state.user;
+  pill.className = 'sync';
+  if (state.demo) { pill.classList.add('demo'); text.textContent = 'Демо-данные'; pill.title = 'Остатки из примера «САЙТ.xlsx». Заявки сохраняются только в этом браузере.'; return; }
+  if (!state.updated) { pill.classList.add('bad'); text.textContent = 'Нет выгрузки'; pill.title = 'Остатки из 1С ещё не загружены'; return; }
+  const minutes = Math.round((Date.now() - Date.parse(state.updated)) / 60_000);
+  pill.classList.add(minutes > STALE_MINUTES ? 'bad' : minutes > 35 ? 'warn' : 'ok');
+  text.textContent = (minutes > STALE_MINUTES ? 'Устарели · ' : 'Остатки на ') + timeOnly.format(new Date(state.updated));
+  pill.title = `Выгрузка из 1С: ${clock.format(new Date(state.updated))} МСК (${minutes} мин назад)`;
+  banner(minutes > STALE_MINUTES ? `Остатки устарели: последняя выгрузка из 1С была ${clock.format(new Date(state.updated))} МСК. Заявки временно не принимаются.` : '', true);
+}
+function selectDemoLocation(id) {
+  const warehouse = state.demoLocations.find(loc => loc.id === WAREHOUSE);
+  const location = state.demoLocations.find(loc => loc.id === id) ?? state.demoLocations.find(loc => loc.id !== WAREHOUSE);
+  if (!location || !warehouse) throw new Error('В примере отсутствует нужный склад.');
+  const role = location.id === WAREHOUSE ? 'warehouse' : 'store';
+  state.user = { role, store: location.id, name: location.name.replace(/^Магазин\s+/i, '') };
+  state.stocks = { warehouse: warehouse.rows, store: role === 'store' ? location.rows : [] };
+  storageWrite('peak-demo-location', location.id);
+  if (canOrder()) restoreCart(); else { state.cart = new Map(); updateCartCount(); }
+  updateAccount();
+  buildIndex();
+  $('demo-role').value = location.id;
+  renderSync();
+  state.ordersLoaded = false;
+  void loadOrders({ quiet: true });
+  renderSummary();
+  renderCatalog();
+  if (role === 'warehouse') showSection('orders');
+  else if (state.active === 'orders') void loadOrders();
 }
 async function refreshStock() {
   if (state.loadingStock || state.demo || !state.user) return;
   state.loadingStock = true;
   try {
     const stock = await api('/api/stock');
+    state.stockDenied = false;
     if (stock.updatedAt !== state.updated) {
       state.updated = stock.updatedAt;
-      state.stocks = stock;
+      state.stocks = { warehouse: stock.warehouse ?? [], store: stock.store ?? [] };
       buildIndex();
+      renderSummary();
       renderCatalog();
+      if (state.current && productDialog.open) openProduct(state.current.article);
     }
-    showSync();
-  } catch (err) { banner(err.message, true); }
-  finally { state.loadingStock = false; }
+    renderSync();
+  } catch (err) {
+    if (err.status === 403 && isWarehouse()) { state.stockDenied = true; updateAccount(); showSection('orders'); }
+    else banner(err.message, true);
+  } finally { state.loadingStock = false; }
 }
 
-$('grid').onclick = event => {
-  const card = event.target.closest('[data-product]');
-  if (card) openProduct(card.dataset.product);
-};
+// ---------- Клавиатура ----------
+document.addEventListener('keydown', event => {
+  if (event.key === '/' && !event.target.closest('input,textarea,select') && !document.querySelector('dialog[open]')) {
+    event.preventDefault();
+    if (state.active !== 'catalog') showSection('catalog');
+    $('search').focus();
+    $('search').select();
+  }
+});
 $('catalog-tab').onclick = () => showSection('catalog');
 $('orders-tab').onclick = () => showSection('orders');
-$('refresh-orders').onclick = loadOrders;
-$('cart-button').onclick = () => { renderCart(); cartDialog.showModal(); };
+$('refresh-orders').onclick = () => loadOrders();
+$('cart-button').onclick = openCart;
 $('demo-role').onchange = event => selectDemoLocation(event.target.value);
-for (const id of ['search']) {
-  let scheduled;
-  $(id).addEventListener(id === 'search' ? 'input' : 'change', () => {
-    clearTimeout(scheduled);
-    scheduled = setTimeout(() => { state.page = 0; renderCatalog(); }, id === 'search' ? 90 : 0);
-  });
-}
 
-for (const dialog of [productDialog,cartDialog]) dialog.addEventListener('click', event => {
-  if (event.target !== dialog) return;
-  const rect = dialog.getBoundingClientRect();
-  if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
-});
-
+// ---------- Запуск ----------
 async function start() {
+  const route = readHash();
   try {
-    const [catalog, session] = await Promise.all([api('/data/catalog.json'),api('/api/session')]);
+    const [catalog, session] = await Promise.all([api('/data/catalog.json'), api('/api/session')]);
     state.catalog = catalog;
     state.demo = session.user === null;
     if (state.demo) {
       state.demoLocations = (await api(offline ? '/data/stock-example.json' : '/api/owner-preview')).locations;
-      for (const location of state.demoLocations) $('demo-role').add(new Option(location.name, location.id));
-      selectDemoLocation('etazhi');
-      showSync();
-      return;
+      for (const loc of state.demoLocations) $('demo-role').add(new Option(loc.name, loc.id));
+      selectDemoLocation(storageRead('peak-demo-location', 'etazhi'));
+    } else {
+      state.user = session.user;
+      if (canOrder()) restoreCart();
+      updateAccount();
+      buildIndex();
+      renderSync();
+      renderCatalog();
+      await refreshStock();
+      void loadOrders({ quiet: true });
+      setInterval(refreshStock, 60_000);
+      setInterval(renderSync, 60_000);
+      setInterval(() => { if (isWarehouse()) void loadOrders({ quiet: true }); }, 60_000);
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) { void refreshStock(); if (isWarehouse()) void loadOrders({ quiet: true }); } });
     }
-    state.user = session.user;
-    if(state.user.role==='warehouse'){updateAccount();showSection('orders');return;}
-    if (canOrder()) restoreCart();
-    updateAccount();
-    showSync();
-    buildIndex();
-    renderCatalog();
-    await refreshStock();
-    setInterval(refreshStock,60_000);
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) void refreshStock(); });
+    if (route.tab === 'orders' || (isWarehouse() && route.tab !== 'catalog')) showSection('orders');
+    else if (route.tab === 'catalog') showSection('catalog');
+    if (route.product && state.byArticle.has(route.product)) openProduct(route.product);
   } catch (err) {
-    $('grid').setAttribute('aria-busy','false');
-    $('grid').innerHTML = '<p class="empty">' + safe(err.message) + '</p>';
+    $('grid').setAttribute('aria-busy', 'false');
+    $('grid').innerHTML = `<div class="empty"><b>Не удалось открыть каталог</b>${safe(err.message)}</div>`;
   }
 }
 void start();
-

@@ -2,10 +2,10 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f5f7">
-  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#101010">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0e0e10">
   <meta name="robots" content="noindex,nofollow">
   <title>PEAK — каталог и пополнение</title>
   <link rel="icon" href="/mark.svg">
@@ -13,47 +13,110 @@
   <script type="module" src="/app.js"></script>
 </head>
 <body>
+  <a class="skip" href="#grid">К товарам</a>
   <header class="bar">
     <div class="bar-inner">
-      <a class="brand" href="/" aria-label="PEAK, главная"><span class="peak-sign"><svg aria-hidden="true" viewBox="0 0 64 48"><path fill="#ef3931" d="M2 44 30 2h7l19 29H44L34 16 21 35h36l6 9z"/></svg><img src="/logo.png" alt="PEAK" width="72" height="28"></span><span>Каталог</span></a>
-      <nav aria-label="Разделы">
+      <a class="brand" href="./" aria-label="PEAK, главная">
+        <svg class="brand-mark" aria-hidden="true" viewBox="0 0 64 48"><path fill="#e8322a" d="M2 44 30 2h7l19 29H44L34 16 21 35h36l6 9z"/></svg>
+        <img src="/logo.png" alt="PEAK" width="70" height="24">
+        <span class="brand-sub">Каталог</span>
+      </a>
+      <nav class="tabs" aria-label="Разделы">
         <button id="catalog-tab" type="button" aria-current="page">Каталог</button>
-        <button id="orders-tab" type="button">Заявки</button>
+        <button id="orders-tab" type="button">Заявки<b id="orders-badge" class="badge" hidden></b></button>
       </nav>
       <div class="top-actions">
+        <span id="sync" class="sync" role="status" hidden><i></i><span></span></span>
         <label class="location"><span id="account-name"></span><select id="demo-role" aria-label="Магазин или склад в демонстрации" hidden></select></label>
-        <button id="cart-button" class="cart-button" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h2l2.6 12h10.9l2.5-8H6.3M9 20h.01M17 20h.01"/></svg><span>Корзина</span><b id="cart-count">0</b></button>
+        <button id="cart-button" class="cart-button" type="button" hidden aria-label="Корзина">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h2l2.6 12h10.9l2.5-8H6.3M9 20h.01M17 20h.01"/></svg>
+          <span class="cart-label">Корзина</span><b id="cart-count">0</b>
+        </button>
       </div>
     </div>
   </header>
-  <main class="shell">
 
+  <main class="shell">
     <p id="notice" class="notice" role="status" hidden></p>
+
     <section id="catalog" aria-label="Ассортимент">
-      <div class="catalog-tools"><label class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><input id="search" type="search" placeholder="Артикул, название или цвет" aria-label="Поиск товара" autocomplete="off"></label><button id="filter-toggle" class="secondary" aria-haspopup="dialog">Фильтры</button></div>
-      <dialog id="filter-dialog" aria-labelledby="filter-title">
-        <form method="dialog"><header><h2 id="filter-title">Фильтры</h2><button value="cancel" aria-label="Закрыть" class="close">×</button></header>
-        <label>Категория<select id="category"><option value="">Все категории</option></select></label>
-        <label>Сезон<select id="season"><option value="">Все сезоны</option></select></label>
-        <label>Размер<select id="size"><option value="">Все размеры</option></select></label>
-        <label>Нужны магазину<select id="store-needs"><option value="">Все товары</option><option value="size">Недостающие размеры</option><option value="article">Артикулы, которых нет в магазине</option></select></label>
-        <label class="stock-choice"><input id="in-stock" type="checkbox">Есть на Лиственной</label>
-        <footer><button class="secondary" type="button" id="filter-reset">Сбросить</button><button class="primary" value="apply">Применить</button></footer></form>
-      </dialog><div class="heading"><h2>Ассортимент</h2><span id="result-count" aria-live="polite"></span></div>
+      <div id="summary" class="summary" aria-label="Сводка"></div>
+
+      <div class="toolbar">
+        <label class="search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+          <input id="search" type="search" placeholder="Артикул, название или цвет" aria-label="Поиск товара" autocomplete="off" enterkeyhint="search">
+          <kbd aria-hidden="true">/</kbd>
+        </label>
+        <label class="sort"><span class="sr">Сортировка</span>
+          <select id="sort">
+            <option value="">По умолчанию</option>
+            <option value="new">Сначала новый сезон</option>
+            <option value="wh">Больше на Лиственной</option>
+            <option value="need">Больше недостающих размеров</option>
+            <option value="low">Меньше в магазине</option>
+            <option value="name">По названию</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="filters" role="group" aria-label="Фильтры">
+        <div class="seg" role="group" aria-label="Для кого">
+          <button type="button" data-aud="" aria-pressed="true">Все</button>
+          <button type="button" data-aud="Взрослые" aria-pressed="false">Взрослые</button>
+          <button type="button" data-aud="Дети" aria-pressed="false">Дети</button>
+        </div>
+        <div class="chip-row" role="group" aria-label="Тип товара">
+          <button type="button" class="chip" data-kind="Обувь" aria-pressed="false">Обувь</button>
+          <button type="button" class="chip" data-kind="Одежда" aria-pressed="false">Одежда</button>
+          <button type="button" class="chip" data-kind="Аксессуары" aria-pressed="false">Аксессуары</button>
+        </div>
+        <label class="pick"><span class="sr">Сезон</span><select id="season"><option value="">Все сезоны</option></select></label>
+        <label class="pick"><span class="sr">Размер</span><select id="size"><option value="">Все размеры</option></select></label>
+        <label class="pick need-pick"><span class="sr">Что нужно магазину</span>
+          <select id="need">
+            <option value="">Все товары</option>
+            <option value="size">Недостающие размеры</option>
+            <option value="article">Нет в магазине</option>
+            <option value="negative">Отрицательные остатки</option>
+          </select>
+        </label>
+        <button type="button" class="chip toggle" id="in-stock" aria-pressed="false">Есть на Лиственной</button>
+        <button type="button" class="link" id="reset" hidden>Сбросить</button>
+      </div>
+
+      <div class="heading">
+        <h2>Ассортимент <span id="result-count" aria-live="polite"></span></h2>
+        <button id="bulk-add" class="primary small" type="button" hidden></button>
+      </div>
       <div id="grid" class="grid" aria-busy="true"></div>
-      <div id="pager"></div>
+      <div id="pager" aria-hidden="true"></div>
     </section>
+
     <section id="orders" aria-label="Заявки" hidden>
-      <div class="heading"><h2 id="orders-title">Заявки</h2><button id="refresh-orders" class="secondary" type="button">Обновить</button></div>
+      <div class="heading">
+        <h2 id="orders-title">Заявки</h2>
+        <button id="refresh-orders" class="secondary small" type="button">Обновить</button>
+      </div>
+      <div class="filters orders-filters">
+        <div class="seg" id="order-status" role="group" aria-label="Статус заявки"></div>
+        <label class="pick" id="order-store-pick" hidden><span class="sr">Магазин</span><select id="order-store"><option value="">Все магазины</option></select></label>
+        <label class="search small-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><input id="order-search" type="search" placeholder="Артикул или № документа" aria-label="Поиск по заявкам" autocomplete="off"></label>
+      </div>
       <div id="order-list"></div>
     </section>
   </main>
+
   <dialog id="product-dialog" aria-labelledby="product-title"></dialog>
   <dialog id="photo-dialog" aria-label="Фотография товара">
-    <div class="viewer-bar"><span id="photo-title"></span><button class="close" id="photo-close" aria-label="Закрыть фото">×</button></div>
-    <div class="viewer-frame"><div class="viewer-canvas"><img id="photo-full" alt=""></div></div>
+    <div class="viewer-bar"><span id="photo-title"></span><button class="close" id="photo-close" type="button" aria-label="Закрыть фото">×</button></div>
+    <div class="viewer-frame"><img id="photo-full" alt=""></div>
   </dialog>
-  <dialog id="cart-dialog" aria-labelledby="cart-title"></dialog>
+  <dialog id="cart-dialog" class="cart-dialog" aria-labelledby="cart-title"></dialog>
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-text">
+    <form method="dialog"><p id="confirm-text"></p><footer><button class="secondary" value="no">Отмена</button><button class="primary" value="yes" id="confirm-yes">Да</button></footer></form>
+  </dialog>
+  <div id="print-area" aria-hidden="true"></div>
   <p id="toast" class="toast" role="status" hidden></p>
 </body>
 </html>

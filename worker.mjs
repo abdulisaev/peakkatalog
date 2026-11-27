@@ -4,6 +4,7 @@ const json = (body, status = 200) => Response.json(body, {
   status, headers: { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }
 });
 const error = (status, message) => json({ error: message }, status);
+const note = (value, limit) => typeof value === 'string' && value.length <= limit && !/[\u0000-\u0009\u000b-\u001f]/u.test(value);
 const clean = (value, limit) => typeof value === 'string' && value.length <= limit && !/[\u0000-\u001f]/u.test(value);
 const skuKey = (a, c, z) => JSON.stringify([a.trim().toUpperCase(), c.trim().toLowerCase(), z.trim().toUpperCase()]);
 const storeId = value => typeof value === 'string' && /^[a-z0-9][a-z0-9-]{0,31}$/.test(value);
@@ -105,7 +106,8 @@ async function getStock(db, user) {
 
 function orderRow(row) {
   return { id: row.id, store: row.store, name: row.store_name, created: row.created,
-    items: JSON.parse(row.items), status: row.status, document: row.document, note: row.note };
+    items: JSON.parse(row.items), status: row.status, document: row.document, note: row.note,
+    comment: row.comment ?? '', processed: row.processed_at ?? null };
 }
 
 async function listOrders(db, user) {
@@ -120,8 +122,10 @@ async function createOrder(request, db, user) {
   if (user.role !== 'store') return error(403, 'Заявку отправляет директор магазина');
   const body = await readBody(request);
   if (!uuid(body?.id) || !Array.isArray(body.items) || body.items.length < 1 || body.items.length > 250) {
-    return error(400, 'Проверьте состав заявки');
+    return error(400, 'Проверьте состав заявки: от 1 до 250 позиций');
   }
+  const comment = (body.comment ?? '').replace(/\r\n?/g, '\n').trim();
+  if (!note(comment, 500)) return error(400, 'Комментарий — не длиннее 500 символов');
   const existing = await db.prepare('SELECT * FROM orders WHERE id = ?').bind(body.id).first();
   if (existing) return existing.store === user.store ? json(orderRow(existing)) : error(409, 'Номер заявки уже существует');
   const stock = await getStock(db, user);
@@ -142,9 +146,9 @@ async function createOrder(request, db, user) {
     if (!variant || variant[3] < line.qty) return error(409, 'Изменился остаток: ' + line.a + ', ' + line.size);
     items.push({ a: variant[0], color: variant[1], size: variant[2], qty: line.qty });
   }
-  const saved = await db.prepare(`INSERT INTO orders (id, store, store_name, created, items)
-    VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING RETURNING *`)
-    .bind(body.id, user.store, user.name, new Date().toISOString(), JSON.stringify(items)).first();
+  const saved = await db.prepare(`INSERT INTO orders (id, store, store_name, created, items, comment)
+    VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING RETURNING *`)
+    .bind(body.id, user.store, user.name, new Date().toISOString(), JSON.stringify(items), comment).first();
   if (saved) return json(orderRow(saved), 201);
   const retry = await db.prepare('SELECT * FROM orders WHERE id = ? AND store = ?').bind(body.id, user.store).first();
   return retry ? json(orderRow(retry)) : error(409, 'Номер заявки уже существует');
@@ -178,7 +182,7 @@ export default {
         if (!env.PEAK_OWNER_EMAIL || (request.headers.get('oai-authenticated-user-email')||'').toLowerCase() !== env.PEAK_OWNER_EMAIL.toLowerCase()) return error(403,'Аккаунту ещё не назначен магазин.');
         return path === '/api/session' ? json({user:null}) : json(OWNER_SNAPSHOT);
       }
-      if (user?.role === 'warehouse' && path === '/api/stock') return error(403,'Доступны только заявки');
+      // Склад видит каталог с остатками Лиственной: так при обработке заявки видно, хватает ли товара.
       if (path === '/api/session' && method === 'GET') return json({ user });
       if (!user) return error(403, 'Для аккаунта ещё не назначен магазин или роль склада');
       if (path === '/api/stock' && method === 'GET') return json(await getStock(env.DB, user));
