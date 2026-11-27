@@ -857,7 +857,7 @@ function renderCart() {
     group.sort((x, y) => sizeOrder(x.size, y.size));
     return `<div class="cart-group">
       ${src ? `<img class="thumb" src="${safe(src)}" alt="" loading="lazy">` : '<span class="thumb empty-thumb">нет фото</span>'}
-      <div><h3>${safe(p?.n || first.a)}</h3><div class="meta"><span class="code">${safe(first.a)}</span><span>· ${safe(first.color || 'без цвета')}</span></div>
+      <div><h3>${safe(p?.n || first.a)}</h3><div class="meta"><span class="code">${safe(first.a)}</span>${seasonOf(first) ? `<span>· сезон ${safe(seasonOf(first))}</span>` : ''}<span>· ${safe(first.color || 'без цвета')}</span></div>
       <div class="cart-lines">${group.map(line => {
         const sku = key(line.a, line.color, line.size);
         const max = available(line);
@@ -907,8 +907,8 @@ cartDialog.addEventListener('click', async event => {
     state.cart.clear(); state.orderId = null; state.comment = ''; saveCart(); updateCartCount(); renderCart();
   } else if (b.hasAttribute('data-export')) {
     const lines = [...state.cart.values()].sort((x, y) => collator.compare(x.a, y.a) || collator.compare(x.color, y.color) || sizeOrder(x.size, y.size));
-    download(`PEAK-корзина-${state.user.store}-${fileStamp()}.csv`, csv([['Артикул', 'Наименование', 'Цвет', 'Размер', 'Количество', 'На Лиственной'],
-      ...lines.map(l => [l.a, state.byArticle.get(l.a)?.n ?? '', l.color, sizeName(l.size), l.qty, available(l)])]));
+    download(`PEAK-корзина-${state.user.store}-${fileStamp()}.csv`, csv([['Артикул', 'Сезон', 'Наименование', 'Цвет', 'Размер', 'Количество', 'На Лиственной'],
+      ...lines.map(l => [l.a, seasonOf(l), state.byArticle.get(l.a)?.n ?? '', l.color, sizeName(l.size), l.qty, available(l)])]));
   } else if (b.id === 'submit-order') submitCart(b);
 });
 cartDialog.addEventListener('change', event => {
@@ -936,9 +936,9 @@ async function submitCart(button) {
   try {
     if (state.demo) {
       const orders = storageRead(demoOrdersKey, []);
-      const order = { id: state.orderId, store: state.user.store, name: state.user.name, items: lines, comment, created: new Date().toISOString(), status: 'new' };
+      const order = { id: state.orderId, store: state.user.store, name: state.user.name, items: lines.map(line => ({ ...line, s: seasonOf(line) })), comment, created: new Date().toISOString(), status: 'new' };
       if (!orders.some(x => x.id === order.id) && !storageWrite(demoOrdersKey, [order, ...orders].slice(0, 200))) throw new Error('Браузер не смог сохранить тестовую заявку.');
-    } else await api('/api/orders', { id: state.orderId, items: lines.map(({ a, color, size, qty: n }) => ({ a, color, size, qty: n })), ...(comment ? { comment } : {}) });
+    } else await api('/api/orders', { id: state.orderId, items: lines.map(({ a, color, size, qty: n }) => ({ a, color, size, qty: n, s: seasonOf({ a }) })), ...(comment ? { comment } : {}) });
     state.cart.clear(); state.orderId = null; state.comment = '';
     saveCart(); updateCartCount();
     cartDialog.close();
@@ -956,6 +956,9 @@ async function submitCart(button) {
 // ---------- Заявки ----------
 function orderQty(order) { return order.items.reduce((n, i) => n + i.qty, 0); }
 function whNow(line) { return hasStock() ? available(line) : null; }
+// Сезон берётся из самой заявки; у старых заявок — из каталога.
+function seasonOf(line) { return line.s || state.byArticle.get(line.a)?.s || ''; }
+function orderSeasons(order) { return [...new Set(order.items.map(seasonOf).filter(Boolean))].sort((a, b) => seasonRank(b) - seasonRank(a)); }
 function sortedItems(order) {
   return [...order.items].sort((x, y) => collator.compare(x.a, y.a) || collator.compare(x.color, y.color) || sizeOrder(x.size, y.size));
 }
@@ -977,7 +980,7 @@ function renderOrders() {
   $('order-list').innerHTML = shown.map(order => {
     const items = sortedItems(order);
     return `<details class="order" data-order="${safe(order.id)}" ${shown.length === 1 ? 'open' : ''}>
-      <summary><div><b>${safe(order.name)}</b><small>${clock.format(new Date(order.created))} МСК · ${order.items.length} поз. · ${fmt.format(orderQty(order))} шт.${order.document ? ' · ' + safe(order.document) : ''}</small></div>
+      <summary><div><b>${safe(order.name)}</b><small>${clock.format(new Date(order.created))} МСК · ${order.items.length} поз. · ${fmt.format(orderQty(order))} шт.${orderSeasons(order).length ? ' · ' + orderSeasons(order).map(safe).join(', ') : ''}${order.document ? ' · ' + safe(order.document) : ''}</small></div>
       <span class="status ${safe(order.status)}">${safe(statusLabels[order.status] ?? order.status)}</span></summary>
       <div class="order-body">
         <div class="order-meta">
@@ -985,10 +988,10 @@ function renderOrders() {
           ${order.document ? `<p>Документ 1С: <b>${safe(order.document)}</b>${order.processed ? ' · ' + clock.format(new Date(order.processed)) + ' МСК' : ''}</p>` : ''}
           ${order.note ? `<p>Причина отказа: ${safe(order.note)}</p>` : ''}
         </div>
-        <div class="table-wrap"><table class="data"><thead><tr><th>Артикул</th><th>Наименование</th><th>Цвет</th><th>Размер</th><th class="n">Шт.</th>${warehouseView && order.status === 'new' && hasStock() ? '<th class="n">На Лиственной</th>' : ''}</tr></thead><tbody>
+        <div class="table-wrap"><table class="data"><thead><tr><th>Артикул</th><th>Сезон</th><th>Наименование</th><th>Цвет</th><th>Размер</th><th class="n">Шт.</th>${warehouseView && order.status === 'new' && hasStock() ? '<th class="n">На Лиственной</th>' : ''}</tr></thead><tbody>
         ${items.map(line => {
           const now = warehouseView && order.status === 'new' ? whNow(line) : null;
-          return `<tr><td class="code">${safe(line.a)}</td><td class="nm">${safe(state.byArticle.get(line.a)?.n ?? '')}</td><td>${safe(line.color || '—')}</td><td>${safe(sizeName(line.size))}</td><td class="n">${line.qty}</td>${now != null ? `<td class="n ${now < line.qty ? 'short' : ''}">${now}</td>` : ''}</tr>`;
+          return `<tr><td class="code">${safe(line.a)}</td><td>${safe(seasonOf(line) || '—')}</td><td class="nm">${safe(state.byArticle.get(line.a)?.n ?? '')}</td><td>${safe(line.color || '—')}</td><td>${safe(sizeName(line.size))}</td><td class="n">${line.qty}</td>${now != null ? `<td class="n ${now < line.qty ? 'short' : ''}">${now}</td>` : ''}</tr>`;
         }).join('')}</tbody></table></div>
         <div class="order-tools">
           <button type="button" class="secondary small" data-print>Печать сборочного листа</button>
@@ -1034,9 +1037,9 @@ function printOrder(order) {
   $('print-area').innerHTML = `<h1>Сборочный лист: Лиственная → ${safe(order.name)}</h1>
     <p>Заявка от ${clock.format(new Date(order.created))} МСК · ${items.length} поз. · ${fmt.format(orderQty(order))} шт. · № ${safe(order.id.slice(0, 8))}${order.document ? ' · Документ 1С: ' + safe(order.document) : ''}</p>
     ${order.comment ? `<p>Комментарий: ${safe(order.comment)}</p>` : ''}
-    <table><thead><tr><th>№</th><th>Артикул</th><th>Наименование</th><th>Цвет</th><th>Размер</th><th class="n">Шт.</th><th>Собрано</th></tr></thead>
-    <tbody>${items.map((l, i) => `<tr><td>${i + 1}</td><td>${safe(l.a)}</td><td>${safe(state.byArticle.get(l.a)?.n ?? '')}</td><td>${safe(l.color)}</td><td>${safe(sizeName(l.size))}</td><td class="n">${l.qty}</td><td class="box"></td></tr>`).join('')}</tbody>
-    <tfoot><tr><td colspan="5">Итого</td><td class="n">${fmt.format(orderQty(order))}</td><td></td></tr></tfoot></table>
+    <table><thead><tr><th>№</th><th>Артикул</th><th>Сезон</th><th>Наименование</th><th>Цвет</th><th>Размер</th><th class="n">Шт.</th><th>Собрано</th></tr></thead>
+    <tbody>${items.map((l, i) => `<tr><td>${i + 1}</td><td>${safe(l.a)}</td><td>${safe(seasonOf(l) || '—')}</td><td>${safe(state.byArticle.get(l.a)?.n ?? '')}</td><td>${safe(l.color)}</td><td>${safe(sizeName(l.size))}</td><td class="n">${l.qty}</td><td class="box"></td></tr>`).join('')}</tbody>
+    <tfoot><tr><td colspan="6">Итого</td><td class="n">${fmt.format(orderQty(order))}</td><td></td></tr></tfoot></table>
     <div class="sign"><span>Собрал: ____________________</span><span>Проверил: ____________________</span></div>`;
   window.print();
 }
@@ -1048,11 +1051,11 @@ $('order-list').addEventListener('click', async event => {
   if (!order) return;
   if (b.hasAttribute('data-print')) return printOrder(order);
   if (b.hasAttribute('data-ocsv')) {
-    return download(`PEAK-заявка-${order.store}-${order.created.slice(0, 10)}.csv`, csv([['Артикул', 'Наименование', 'Цвет', 'Размер', 'Количество'],
-      ...sortedItems(order).map(l => [l.a, state.byArticle.get(l.a)?.n ?? '', l.color, sizeName(l.size), l.qty])]));
+    return download(`PEAK-заявка-${order.store}-${order.created.slice(0, 10)}.csv`, csv([['Артикул', 'Сезон', 'Наименование', 'Цвет', 'Размер', 'Количество'],
+      ...sortedItems(order).map(l => [l.a, seasonOf(l), state.byArticle.get(l.a)?.n ?? '', l.color, sizeName(l.size), l.qty])]));
   }
   if (b.hasAttribute('data-ocopy')) {
-    const text = `Заявка ${order.name}, ${clock.format(new Date(order.created))}\n` + sortedItems(order).map(l => `${l.a} ${l.color} ${sizeName(l.size)} — ${l.qty} шт.`).join('\n') + `\nИтого: ${orderQty(order)} шт.`;
+    const text = `Заявка ${order.name}, ${clock.format(new Date(order.created))}\n` + sortedItems(order).map(l => `${l.a}${seasonOf(l) ? ' (' + seasonOf(l) + ')' : ''} ${l.color} ${sizeName(l.size)} — ${l.qty} шт.`).join('\n') + `\nИтого: ${orderQty(order)} шт.`;
     return notify(await copyText(text) ? 'Список скопирован' : 'Не удалось скопировать');
   }
   if (b.hasAttribute('data-repeat')) {

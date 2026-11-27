@@ -240,7 +240,9 @@ async function createOrder(request, db, user) {
     seen.add(key);
     const variant = available.get(key);
     if (!variant || variant[3] < line.qty) return error(409, 'Изменился остаток: ' + line.a + ', ' + line.size);
-    items.push({ a: variant[0], color: variant[1], size: variant[2], qty: line.qty });
+    // Сезон артикула (26Q3 и т. п.) приходит из каталога сайта и сохраняется в заявке как есть.
+    const season = typeof line.s === 'string' && /^[0-9A-Za-zА-Яа-яЁё-]{1,10}$/u.test(line.s.trim()) ? line.s.trim().toUpperCase() : '';
+    items.push({ a: variant[0], color: variant[1], size: variant[2], qty: line.qty, ...(season ? { s: season } : {}) });
   }
   const saved = await db.prepare(`INSERT INTO orders (id, store, store_name, created, items, comment)
     VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING RETURNING *`)
