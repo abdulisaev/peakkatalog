@@ -27,6 +27,7 @@ const icons = {
   next: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>',
   link: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/></svg>',
   trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
+  close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
   peak: '<svg viewBox="0 0 64 48" aria-hidden="true"><path fill="currentColor" d="M2 44 30 2h7l19 29H44L34 16 21 35h36l6 9z"/></svg>'
 };
 
@@ -69,10 +70,11 @@ const state = {
   cart: new Map(), orderId: null, comment: '',
   orders: [], ordersLoaded: false,
   active: 'catalog',
-  f: { q: '', aud: '', kind: '', season: '', size: '', need: '', wh: false, sort: '' },
+  f: { q: '', aud: [], kind: [], season: [], size: [], absent: false, sort: '' }, base: [],
   of: { status: 'new', store: '', q: '' },
   current: null, draft: new Map()
 };
+if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 const productDialog = $('product-dialog');
 const cartDialog = $('cart-dialog');
 const photoDialog = $('photo-dialog');
@@ -117,7 +119,7 @@ function photoSrc(kind, id) {
   if (id == null) return null;
   // Во встроенном файле лежат только крупные фото — их же браузер уменьшает для плиток.
   if (window.PEAK_PHOTOS) return window.PEAK_PHOTOS[kind + '-' + Number(id)] ?? window.PEAK_PHOTOS['detail-' + Number(id)] ?? null;
-  return (offline ? './' : '/') + 'photo/' + kind + '-' + Number(id) + '.jpg';
+  return (offline ? './' : '/') + 'photo/' + kind + '-' + Number(id) + '.' + (window.PEAK_PHOTO_FORMAT || 'jpg');
 }
 function photoMarkup(id, kind, label, eager = false) {
   const src = photoSrc(kind, id);
@@ -168,6 +170,9 @@ function saveCart() { storageWrite(cartStoreKey(), { id: state.orderId, comment:
 function cartTotal() { return [...state.cart.values()].reduce((n, line) => n + line.qty, 0); }
 function updateCartCount(bump = false) {
   $('cart-count').textContent = fmt.format(cartTotal());
+  $('cart-fab-count').textContent = fmt.format(cartTotal());
+  $('cart-count').hidden = !cartTotal();
+  updateCartFab();
   if (bump) { const b = $('cart-button'); b.classList.remove('bump'); void b.offsetWidth; b.classList.add('bump'); }
 }
 function inCart(sku) { return state.cart.get(sku)?.qty ?? 0; }
@@ -185,15 +190,17 @@ function addToCart(lines) {
 }
 
 // ---------- Индекс товаров ----------
+// Отрицательные остатки из 1С показываем как 0: директору нужна наличность, а не ошибки учёта.
+const pos = q => Math.max(0, Number(q) || 0);
 function buildIndex() {
-  const storeStock = new Map(state.stocks.store.map(row => [key(row[0], row[1], row[2]), row[3]]));
-  const whStock = new Map(state.stocks.warehouse.map(row => [key(row[0], row[1], row[2]), row[3]]));
+  const storeStock = new Map(state.stocks.store.map(row => [key(row[0], row[1], row[2]), pos(row[3])]));
+  const whStock = new Map(state.stocks.warehouse.map(row => [key(row[0], row[1], row[2]), pos(row[3])]));
   const network = state.stocks.network;
   const netStock = new Map((network?.rows ?? []).map(row => [key(row[0], row[1], row[2]), row[3]]));
   const map = new Map();
   const ensureProduct = (article, info) => {
     const id = article.trim().toUpperCase();
-    if (!map.has(id)) map.set(id, { a: article.trim(), n: info.name, s: info.season, c: info.category, photo: info.photo ?? null, colors: new Map(), listed: info.listed });
+    if (!map.has(id)) map.set(id, { a: article.trim(), n: info.name, s: info.season, c: info.category, photo: info.photo ?? null, colors: new Map() });
     return map.get(id);
   };
   const ensureColor = (product, name, photo = null) => {
@@ -204,7 +211,7 @@ function buildIndex() {
     return color;
   };
   for (const item of state.catalog) {
-    const product = ensureProduct(item.a, { name: item.n || item.a, season: item.s || '', category: item.c || 'Без категории', photo: item.photo, listed: true });
+    const product = ensureProduct(item.a, { name: item.n || item.a, season: item.s || '', category: item.c || 'Взрослые · Аксессуары', photo: item.photo });
     for (const variant of item.variants) {
       const color = ensureColor(product, variant.color, variant.photo);
       for (const size of variant.sizes) color.sizes.set(size.trim().toUpperCase(), size);
@@ -213,103 +220,160 @@ function buildIndex() {
   const reported = state.demo ? state.demoLocations.flatMap(loc => loc.rows)
     : [...state.stocks.warehouse, ...state.stocks.store, ...(network?.rows ?? []).map(([a, c, z]) => [a, c, z, 0])];
   for (const [article, colorName, size, , label] of reported) {
-    if (!map.has(article.trim().toUpperCase())) ensureProduct(article, { ...describe(label, article), listed: false });
+    if (!map.has(article.trim().toUpperCase())) ensureProduct(article, describe(label, article));
     ensureColor(map.get(article.trim().toUpperCase()), colorName).sizes.set(size.trim().toUpperCase(), size);
   }
   const storeView = canOrder();
   const known = hasStock();
   state.products = [...map.values()].map((p, order) => {
-    const colors = [...p.colors.values()].map(c => ({
-      color: c.color, photo: c.photo,
-      lines: [...c.sizes.values()].sort(sizeOrder).map(size => {
+    const colors = [...p.colors.values()].map(c => {
+      const lines = [...c.sizes.values()].sort(sizeOrder).map(size => {
         const sku = key(p.a, c.color, size);
         const net = known && network ? (netStock.get(sku) ?? []) : null;
         return { size, sku, store: known && storeView ? (storeStock.get(sku) ?? 0) : null, wh: known ? (whStock.get(sku) ?? 0) : null,
           net, netQty: net ? net.reduce((t, [, q]) => t + q, 0) : null };
-      })
-    }));
+      });
+      return { color: c.color, photo: c.photo, lines, wh: lines.reduce((t, l) => t + (l.wh ?? 0), 0) };
+    })
+      // Сначала цвета, которые есть на Лиственной.
+      .sort((x, y) => (y.wh > 0) - (x.wh > 0));
     const lines = colors.flatMap(c => c.lines);
     const sum = field => lines.some(l => l[field] != null) ? lines.reduce((t, l) => t + (l[field] ?? 0), 0) : null;
-    const needLines = storeView ? lines.filter(l => l.store <= 0 && l.wh > 0) : [];
     const inStore = storeView && lines.some(l => l.store > 0);
     const sizes = new Map();
     for (const l of lines) {
-      const s = sizes.get(l.size) ?? { size: l.size, have: false, need: false };
-      if (storeView ? l.store > 0 : l.wh > 0) s.have = true;
-      if (storeView && l.store <= 0 && l.wh > 0) s.need = true;
+      if (known && !(l.wh > 0)) continue;
+      const s = sizes.get(l.size) ?? { size: l.size, need: false };
+      if (storeView && l.store <= 0) s.need = true;
       sizes.set(l.size, s);
     }
+    for (const s of sizes.values()) if (storeView && lines.some(l => l.size === s.size && l.store > 0)) s.need = false;
     return {
       ...p, order, colors,
       photo: p.photo ?? colors.find(c => c.photo != null)?.photo ?? null,
       store: sum('store'), wh: sum('wh'), net: sum('netQty'),
-      elsewhere: lines.filter(l => (!storeView || l.store <= 0) && l.wh <= 0 && l.netQty > 0).length,
-      whModels: lines.some(l => l.wh > 0),
-      need: needLines.length, needQty: needLines.length,
+      onWarehouse: lines.some(l => l.wh > 0),
       absent: storeView && !inStore && lines.some(l => l.wh > 0),
-      gap: storeView && inStore && needLines.length > 0,
-      neg: lines.filter(l => l.store < 0 || l.wh < 0).length,
       sizes: [...sizes.values()].sort((x, y) => sizeOrder(x.size, y.size)),
       rank: seasonRank(p.s),
       hay: normalize([p.a, p.n, p.c, p.s, ...colors.map(c => c.color)].join(' '))
     };
   });
   state.byArticle = new Map(state.products.map(p => [p.a, p]));
-  fillSelect('season', state.products.map(p => p.s), (a, b) => seasonRank(b) - seasonRank(a), 'Все сезоны');
-  fillSelect('size', state.products.flatMap(p => p.sizes.map(s => s.size)).filter(Boolean), sizeOrder, 'Все размеры');
-}
-function fillSelect(id, values, comparator, allLabel) {
-  const select = $(id);
-  const selected = state.f[id] ?? select.value;
-  select.replaceChildren(new Option(allLabel, ''));
-  for (const value of [...new Set(values.filter(Boolean))].sort(comparator)) select.add(new Option(value, value));
-  select.value = [...select.options].some(o => o.value === selected) ? selected : '';
-  state.f[id] = select.value;
+  // Каталог — это ассортимент Лиственной: товары без остатка на складе не показываем.
+  state.base = known ? state.products.filter(p => p.onWarehouse) : state.products;
+  const seasons = new Set(state.base.map(p => p.s).filter(Boolean));
+  const sizes = new Set(state.base.flatMap(p => p.sizes.map(s => s.size)).filter(Boolean));
+  state.f.season = state.f.season.filter(s => seasons.has(s));
+  state.f.size = state.f.size.filter(s => sizes.has(s));
 }
 
-// ---------- Фильтры ----------
+// ---------- Фильтры: все в одной панели, в каждой группе можно выбрать несколько значений ----------
+const SORTS = [['', 'По умолчанию'], ['new', 'Сначала новый сезон'], ['wh', 'Больше на Лиственной'], ['low', 'Меньше в моём магазине'], ['name', 'По названию']];
+const AUDIENCES = ['Взрослые', 'Дети'];
+const KINDS = ['Обувь', 'Одежда', 'Аксессуары'];
+const emptyFilters = () => ({ q: '', aud: [], kind: [], season: [], size: [], absent: false, sort: '' });
 function matches(p, f, terms) {
-  if (f.aud && !p.c.startsWith(f.aud)) return false;
-  if (f.kind && !p.c.endsWith(f.kind)) return false;
-  if (f.season && p.s !== f.season) return false;
+  if (f.aud.length && !f.aud.some(a => p.c.startsWith(a))) return false;
+  if (f.kind.length && !f.kind.some(k => p.c.endsWith(k))) return false;
+  if (f.season.length && !f.season.includes(p.s)) return false;
   if (!terms.every(term => p.hay.includes(term))) return false;
-  const lines = f.size ? p.colors.flatMap(c => c.lines).filter(l => l.size === f.size) : null;
-  if (lines && !lines.length) return false;
-  if (f.wh && !(lines ? lines.some(l => l.wh > 0) : p.whModels)) return false;
-  if (f.need === 'size' && !(p.gap && (!lines || lines.some(l => l.store <= 0 && l.wh > 0)))) return false;
-  if (f.need === 'article' && !p.absent) return false;
-  if (f.need === 'negative' && !p.neg) return false;
-  if (f.need === 'network' && !(lines ? lines.some(l => l.store <= 0 && l.wh <= 0 && l.netQty > 0) : p.elsewhere)) return false;
+  if (f.size.length && !p.sizes.some(s => f.size.includes(s.size))) return false;
+  if (f.absent && !p.absent) return false;
   return true;
 }
 const sorters = {
   new: (a, b) => b.rank - a.rank || a.order - b.order,
   wh: (a, b) => (b.wh ?? 0) - (a.wh ?? 0) || a.order - b.order,
-  need: (a, b) => b.need - a.need || b.elsewhere - a.elsewhere || (b.wh ?? 0) - (a.wh ?? 0),
   low: (a, b) => (a.store ?? 0) - (b.store ?? 0) || (b.wh ?? 0) - (a.wh ?? 0),
   name: (a, b) => collator.compare(a.n, b.n) || collator.compare(a.a, b.a)
 };
-function activeFilterCount() {
-  const f = state.f;
-  return [f.q, f.aud, f.kind, f.season, f.size, f.need, f.wh].filter(Boolean).length;
+function filterCount(f = state.f) { return f.aud.length + f.kind.length + f.season.length + f.size.length + (f.absent ? 1 : 0) + (f.sort ? 1 : 0); }
+function filtered(f) {
+  const terms = normalize(f.q).split(/\s+/).filter(Boolean);
+  const found = (state.base ?? []).filter(p => matches(p, f, terms));
+  if (f.sort && sorters[f.sort]) found.sort(sorters[f.sort]);
+  return found;
 }
-function syncControls() {
+function renderActiveFilters() {
   const f = state.f;
-  if (document.activeElement !== $('search') && $('search').value !== f.q) $('search').value = f.q;
-  for (const id of ['season', 'size', 'need', 'sort']) { $(id).value = f[id]; $(id).classList.toggle('active', Boolean(f[id]) && id !== 'sort'); }
-  for (const b of document.querySelectorAll('[data-aud]')) b.setAttribute('aria-pressed', String(b.dataset.aud === f.aud));
-  for (const b of document.querySelectorAll('[data-kind]')) b.setAttribute('aria-pressed', String(b.dataset.kind === f.kind));
-  $('in-stock').setAttribute('aria-pressed', String(f.wh));
-  $('reset').hidden = !activeFilterCount() && !f.sort;
-  $('need').closest('label').hidden = !canOrder();
-  for (const b of document.querySelectorAll('.kpi[data-need]')) b.setAttribute('aria-pressed', String(b.dataset.need === f.need));
-  const whKpi = document.querySelector('.kpi[data-wh]'); whKpi?.setAttribute('aria-pressed', String(f.wh && !f.need));
+  const pills = [
+    ...f.aud.map(v => ['aud', v, v]), ...f.kind.map(v => ['kind', v, v]), ...f.season.map(v => ['season', v, v]),
+    ...f.size.map(v => ['size', v, 'Размер ' + sizeName(v)]), ...(f.absent ? [['absent', '1', 'Нет у меня']] : []),
+    ...(f.sort ? [['sort', f.sort, SORTS.find(s => s[0] === f.sort)?.[1]]] : [])
+  ];
+  $('active-filters').innerHTML = pills.map(([group, value, label]) =>
+    `<button type="button" class="pill" data-remove-filter="${group}" data-value="${safe(value)}" aria-label="Убрать фильтр ${safe(label)}">${safe(label)}<span aria-hidden="true">×</span></button>`).join('')
+    + (pills.length > 1 ? '<button type="button" class="pill-clear" data-clear-filters>Сбросить всё</button>' : '');
+  $('active-filters').hidden = !pills.length;
+  const n = filterCount();
+  $('filter-count').textContent = n;
+  $('filter-count').hidden = !n;
 }
+$('active-filters').addEventListener('click', event => {
+  const b = event.target.closest('button');
+  if (!b) return;
+  if (b.hasAttribute('data-clear-filters')) return setFilter({ ...emptyFilters(), q: state.f.q });
+  const group = b.dataset.removeFilter, value = b.dataset.value;
+  if (group === 'absent') setFilter({ absent: false });
+  else if (group === 'sort') setFilter({ sort: '' });
+  else setFilter({ [group]: state.f[group].filter(v => v !== value) });
+});
+
+// Панель фильтров работает с черновиком: число моделей обновляется сразу, применяется кнопкой «Показать».
+const filterDialog = $('filter-dialog');
+let draftFilters = null;
+function openFilters() {
+  draftFilters = structuredClone(state.f);
+  renderFilterSheet();
+  filterDialog.showModal();
+}
+function renderFilterSheet() {
+  const f = draftFilters;
+  const group = (name, title, values, label = v => v, wide = false) => values.length ? `<section class="fs-group">
+    <h3>${title}</h3><div class="opts ${wide ? 'opts-grid' : ''}">${values.map(v => `<button type="button" class="opt" data-group="${name}" data-value="${safe(v)}" aria-pressed="${f[name].includes(v)}">${safe(label(v))}</button>`).join('')}</div></section>` : '';
+  const seasons = [...new Set(state.base.map(p => p.s).filter(Boolean))].sort((a, b) => seasonRank(b) - seasonRank(a));
+  const sizes = [...new Set(state.base.flatMap(p => p.sizes.map(s => s.size)))].sort(sizeOrder);
+  const count = filtered(f).length;
+  $('filter-body').innerHTML = `
+    <section class="fs-group"><h3>Сортировка</h3><div class="opts">${SORTS.map(([v, l]) => `<button type="button" class="opt" data-sort="${v}" aria-pressed="${f.sort === v}">${l}</button>`).join('')}</div></section>
+    ${canOrder() ? `<section class="fs-group"><label class="switch"><span><b>Нет в моём магазине</b><small>Модели, которых у вас нет совсем, а на Лиственной есть</small></span><input type="checkbox" id="fs-absent" ${f.absent ? 'checked' : ''}><i aria-hidden="true"></i></label></section>` : ''}
+    ${group('aud', 'Для кого', AUDIENCES)}
+    ${group('kind', 'Тип товара', KINDS)}
+    ${group('season', 'Сезон', seasons)}
+    ${group('size', 'Размер', sizes, sizeName, true)}`;
+  $('filter-apply').textContent = count ? `Показать ${fmt.format(count)} ${plural(count, 'модель', 'модели', 'моделей')}` : 'Ничего не найдено';
+  $('filter-apply').disabled = !count;
+  $('filter-reset').disabled = !filterCount(f);
+}
+filterDialog.addEventListener('click', event => {
+  if (event.target === filterDialog) return filterDialog.close();
+  const b = event.target.closest('button');
+  if (!b) return;
+  const scroll = $('filter-body').scrollTop;
+  if (b.dataset.group) {
+    const list = draftFilters[b.dataset.group];
+    const i = list.indexOf(b.dataset.value);
+    if (i >= 0) list.splice(i, 1); else list.push(b.dataset.value);
+  } else if (b.dataset.sort != null) draftFilters.sort = b.dataset.sort;
+  else if (b.id === 'filter-reset') draftFilters = { ...emptyFilters(), q: draftFilters.q };
+  else if (b.id === 'filter-apply') { state.f = draftFilters; filterDialog.close(); renderCatalog(); window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+  else if (b.id === 'filter-close') return filterDialog.close();
+  else return;
+  renderFilterSheet();
+  $('filter-body').scrollTop = scroll;
+});
+filterDialog.addEventListener('change', event => {
+  if (event.target.id === 'fs-absent') { draftFilters.absent = event.target.checked; renderFilterSheet(); }
+});
+$('filter-button').onclick = openFilters;
 
 // ---------- Адрес страницы: фильтры и открытый товар можно отправить ссылкой ----------
 function writeHash() {
   const p = new URLSearchParams();
-  for (const [name, value] of Object.entries(state.f)) if (value) p.set(name, value === true ? '1' : value);
+  for (const [name, value] of Object.entries(state.f)) {
+    if (Array.isArray(value) ? value.length : value) p.set(name, Array.isArray(value) ? value.join('~') : value === true ? '1' : value);
+  }
   p.set('tab', state.active);
   if (state.active === 'catalog' && !isWarehouse()) p.delete('tab');
   if (state.current) p.set('p', state.current.article);
@@ -318,73 +382,36 @@ function writeHash() {
 }
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
-  for (const name of Object.keys(state.f)) state.f[name] = name === 'wh' ? p.get(name) === '1' : (p.get(name) ?? '');
+  const f = emptyFilters();
+  f.q = p.get('q') ?? '';
+  for (const name of ['aud', 'kind', 'season', 'size']) f[name] = p.get(name) ? p.get(name).split('~') : [];
+  f.absent = p.get('absent') === '1';
+  f.sort = SORTS.some(s => s[0] === p.get('sort')) ? p.get('sort') : '';
+  state.f = f;
   return { tab: p.get('tab'), product: p.get('p') };
-}
-
-// ---------- Сводка ----------
-function renderSummary() {
-  const box = $('summary');
-  if (!hasStock() || !state.user) { box.replaceChildren(); return; }
-  const P = state.products;
-  const whModels = P.filter(p => p.whModels);
-  const whQty = P.reduce((t, p) => t + Math.max(0, p.wh ?? 0), 0);
-  const neg = P.filter(p => p.neg).length;
-  const kpi = (attrs, label, value, note, cls = '') => `<button type="button" class="kpi ${cls}" ${attrs} aria-pressed="false"><span>${label}</span><b>${value}</b><small>${note}</small></button>`;
-  if (canOrder()) {
-    const absent = P.filter(p => p.absent);
-    const gaps = P.filter(p => p.gap);
-    const gapSizes = gaps.reduce((t, p) => t + p.need, 0);
-    const store = P.filter(p => p.colors.some(c => c.lines.some(l => l.store > 0)));
-    box.innerHTML =
-      kpi('data-need="article"', 'Нет в магазине, есть на Лиственной', fmt.format(absent.length), plural(absent.length, 'модель', 'модели', 'моделей') + ' можно завезти', 'alert') +
-      kpi('data-need="size"', 'Разбитые размерные ряды', fmt.format(gaps.length), fmt.format(gapSizes) + ' ' + plural(gapSizes, 'размер', 'размера', 'размеров') + ' есть на Лиственной', 'warn') +
-      (state.stocks.network ? (() => { const el = P.filter(p => p.elsewhere); const sizes = el.reduce((t, p) => t + p.elsewhere, 0);
-        return kpi('data-need="network"', 'Нет на Лиственной, есть в сети', fmt.format(el.length), fmt.format(sizes) + ' ' + plural(sizes, 'размер', 'размера', 'размеров') + ' — попросить у магазинов'); })() : '') +
-      kpi('data-wh="1"', 'Есть на Лиственной', fmt.format(whModels.length), fmt.format(whQty) + ' шт.') +
-      (neg ? kpi('data-need="negative"', 'Отрицательные остатки', fmt.format(neg), 'проверить учёт в 1С') :
-        `<div class="kpi"><span>В моём магазине</span><b>${fmt.format(store.length)}</b><small>${fmt.format(P.reduce((t, p) => t + Math.max(0, p.store ?? 0), 0))} шт.</small></div>`);
-  } else {
-    const fresh = state.orders.filter(o => o.status === 'new');
-    box.innerHTML =
-      kpi('data-wh="1"', 'На Лиственной', fmt.format(whModels.length), fmt.format(whQty) + ' шт. в наличии') +
-      `<button type="button" class="kpi alert" data-goto="orders"><span>Новые заявки</span><b>${state.ordersLoaded ? fmt.format(fresh.length) : '…'}</b><small>${fmt.format(fresh.reduce((t, o) => t + o.items.reduce((n, i) => n + i.qty, 0), 0))} шт. к перемещению</small></button>` +
-      kpi('data-need="negative"', 'Отрицательные остатки', fmt.format(neg), 'проверить учёт в 1С', neg ? 'warn' : '') +
-      `<div class="kpi"><span>Без фотографии</span><b>${fmt.format(P.filter(p => p.photo == null && p.whModels).length)}</b><small>моделей в наличии</small></div>`;
-  }
-  syncControls();
 }
 
 // ---------- Каталог ----------
 function tile(p, index) {
   const storeView = canOrder();
-  const status = !storeView ? '' : p.absent ? '<span class="tag state absent">Нет в магазине</span>'
-    : p.gap ? `<span class="tag state gap">−${p.need} ${plural(p.need, 'размер', 'размера', 'размеров')}</span>` : '';
-  const negTag = !status && p.neg ? '<span class="tag state neg">Минус в учёте</span>' : '';
   const sizes = p.sizes.length > 1 || p.sizes[0]?.size ? p.sizes : [];
-  const chips = sizes.slice(0, 9).map(s => `<i class="sz ${s.need ? 'need' : s.have ? 'have' : ''}">${safe(sizeName(s.size))}</i>`).join('')
-    + (sizes.length > 9 ? `<i class="sz more">+${sizes.length - 9}</i>` : '');
+  const chips = sizes.slice(0, 8).map(s => `<i class="sz ${s.need ? 'need' : ''}">${safe(sizeName(s.size))}</i>`).join('')
+    + (sizes.length > 8 ? `<i class="sz more">+${sizes.length - 8}</i>` : '');
   const colorsNote = p.colors.length > 1 ? `${p.colors.length} ${plural(p.colors.length, 'цвет', 'цвета', 'цветов')}` : safe(p.colors[0]?.color || '');
-  const netCell = p.net != null ? `<span>Сеть<b class="${numClass(p.net)}">${qty(p.net)}</b></span>` : '';
-  const strip = storeView
-    ? `<span>Мой магазин<b class="${numClass(p.store)}">${qty(p.store)}</b></span><span>Лиственная<b class="${numClass(p.wh)}">${qty(p.wh)}</b></span>${netCell}`
-    : `<span>Лиственная<b class="${numClass(p.wh)}">${qty(p.wh)}</b></span>${netCell || `<span>Цвета / размеры<b>${p.colors.length} / ${sizes.length || 1}</b></span>`}`;
-  return `<button class="tile" type="button" data-product="${safe(p.a)}">
-    <span class="photo">${photoMarkup(p.photo, 'thumb', p.n, index < 4)}${p.s ? `<span class="tag season">${safe(p.s)}</span>` : ''}${status || negTag}</span>
+  const stat = (label, value) => value == null ? '' : `<span><small>${label}</small><b class="${value > 0 ? '' : 'zero'}">${qty(value)}</b></span>`;
+  return `<button class="tile" type="button" data-product="${safe(p.a)}" style="--i:${index % PAGE}">
+    <span class="photo">${photoMarkup(p.photo, 'thumb', p.n, index < 4)}
+      ${p.s ? `<span class="tag season">${safe(p.s)}</span>` : ''}
+      ${storeView && p.absent ? '<span class="tag absent">Нет у вас</span>' : ''}</span>
     <span class="tile-body">
       <span class="name">${safe(p.n)}</span>
-      <span class="meta"><span class="code">${safe(p.a)}</span><span>· ${colorsNote}</span></span>
-      ${chips ? `<span class="sizes">${chips}</span>` : '<span class="sizes"></span>'}
-      <span class="strip ${storeView && netCell ? 'three' : ''}">${strip}</span>
+      <span class="meta"><span class="code">${safe(p.a)}</span><span class="dot">·</span><span>${colorsNote}</span></span>
+      ${chips ? `<span class="sizes">${chips}</span>` : ''}
+      <span class="stats">${storeView ? stat('У вас', p.store) : ''}${stat('Лиственная', p.wh)}${stat('Сеть', p.net)}</span>
     </span></button>`;
 }
 function renderCatalog() {
-  const f = state.f;
-  const terms = normalize(f.q).split(/\s+/).filter(Boolean);
-  const found = state.products.filter(p => matches(p, f, terms));
-  if (f.sort && sorters[f.sort]) found.sort(sorters[f.sort]);
-  else if (f.need === 'network') found.sort((a, b) => b.elsewhere - a.elsewhere || (b.net ?? 0) - (a.net ?? 0));
-  else if (f.need) found.sort(sorters.need);
+  const found = filtered(state.f);
   state.filtered = found;
   state.shown = 0;
   const grid = $('grid');
@@ -393,7 +420,9 @@ function renderCatalog() {
   $('result-count').textContent = fmt.format(found.length) + ' ' + plural(found.length, 'модель', 'модели', 'моделей');
   if (!found.length) grid.innerHTML = `<div class="empty"><b>Ничего не найдено</b>Измените запрос или <button type="button" class="link" data-reset>сбросьте фильтры</button></div>`;
   appendCards();
-  syncControls();
+  if (document.activeElement !== $('search') && $('search').value !== state.f.q) $('search').value = state.f.q;
+  $('search-clear').hidden = !state.f.q;
+  renderActiveFilters();
   renderBulk();
   writeHash();
 }
@@ -404,32 +433,30 @@ function appendCards() {
 }
 new IntersectionObserver(entries => {
   if (entries.some(e => e.isIntersecting) && state.shown < state.filtered.length) appendCards();
-}, { rootMargin: '900px' }).observe($('pager'));
+}, { rootMargin: '1200px' }).observe($('pager'));
 
-// Массовое пополнение: все недостающие размеры из текущей выборки — по одной штуке.
+// Массовое пополнение (при фильтре «Нет в моём магазине»): все размеры текущей выборки по одной штуке.
 function bulkLines() {
-  const size = state.f.size;
   const lines = [];
   for (const p of state.filtered) for (const c of p.colors) for (const l of c.lines) {
-    if (l.store <= 0 && l.wh > 0 && (!size || l.size === size) && inCart(l.sku) < l.wh && !inCart(l.sku)) lines.push({ a: p.a, color: c.color, size: l.size, qty: 1 });
+    if (l.store <= 0 && l.wh > 0 && (!state.f.size.length || state.f.size.includes(l.size)) && !inCart(l.sku)) lines.push({ a: p.a, color: c.color, size: l.size, qty: 1 });
   }
   return lines;
 }
 function bulkRoom() { return Math.max(0, MAX_LINES - state.cart.size); }
 function renderBulk() {
   const button = $('bulk-add');
-  const show = canOrder() && stockFresh() && (state.f.need === 'size' || state.f.need === 'article');
-  const lines = show ? bulkLines() : [];
+  const lines = canOrder() && stockFresh() && state.f.absent ? bulkLines() : [];
   const n = Math.min(lines.length, bulkRoom());
   button.hidden = !n;
-  button.textContent = `Добавить недостающие · ${fmt.format(n)} ${plural(n, 'позиция', 'позиции', 'позиций')}${n < lines.length ? ' из ' + fmt.format(lines.length) : ''}`;
+  button.textContent = `Добавить всё · ${fmt.format(n)} ${plural(n, 'размер', 'размера', 'размеров')}`;
 }
 $('bulk-add').onclick = async () => {
   const all = bulkLines();
   const lines = all.slice(0, bulkRoom());
   if (!lines.length) return;
   const models = new Set(lines.map(l => l.a)).size;
-  const capped = lines.length < all.length ? ` В одной заявке не больше ${MAX_LINES} позиций, поэтому берём первые по текущей сортировке — остальные добавьте следующей заявкой.` : '';
+  const capped = lines.length < all.length ? ` В одной заявке не больше ${MAX_LINES} позиций — остальное добавьте следующей заявкой.` : '';
   if (!await ask(`Добавить в корзину ${fmt.format(lines.length)} ${plural(lines.length, 'размер', 'размера', 'размеров')} по 1 шт. из ${fmt.format(models)} ${plural(models, 'модели', 'моделей', 'моделей')}?${capped} Количество можно поправить в корзине.`, 'Добавить')) return;
   addToCart(lines);
   notify(`В корзине +${fmt.format(lines.length)} шт.`);
@@ -439,29 +466,16 @@ $('bulk-add').onclick = async () => {
 function setFilter(changes) {
   Object.assign(state.f, changes);
   renderCatalog();
-  window.scrollTo({ top: Math.min(window.scrollY, $('catalog').offsetTop - 70), behavior: 'smooth' });
 }
-function resetFilters() { setFilter({ q: '', aud: '', kind: '', season: '', size: '', need: '', wh: false, sort: '' }); }
+function resetFilters() { setFilter(emptyFilters()); }
 {
   let timer;
-  $('search').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => setFilter({ q: $('search').value }), 120); });
+  $('search').addEventListener('input', () => {
+    $('search-clear').hidden = !$('search').value;
+    clearTimeout(timer); timer = setTimeout(() => setFilter({ q: $('search').value }), 120);
+  });
+  $('search-clear').onclick = () => { $('search').value = ''; setFilter({ q: '' }); $('search').focus(); };
 }
-for (const id of ['season', 'size', 'need', 'sort']) $(id).addEventListener('change', () => setFilter({ [id]: $(id).value }));
-document.querySelector('.filters').addEventListener('click', event => {
-  const b = event.target.closest('button');
-  if (!b) return;
-  if (b.dataset.aud != null) setFilter({ aud: b.dataset.aud });
-  if (b.dataset.kind != null) setFilter({ kind: state.f.kind === b.dataset.kind ? '' : b.dataset.kind });
-  if (b.id === 'in-stock') setFilter({ wh: !state.f.wh });
-  if (b.id === 'reset') resetFilters();
-});
-$('summary').addEventListener('click', event => {
-  const b = event.target.closest('button.kpi');
-  if (!b) return;
-  if (b.dataset.goto) return showSection(b.dataset.goto);
-  if (b.dataset.need != null) setFilter(state.f.need === b.dataset.need ? { need: '' } : { need: b.dataset.need, wh: false });
-  else if (b.dataset.wh) setFilter(state.f.wh && !state.f.need ? { wh: false } : { wh: true, need: '' });
-});
 $('grid').addEventListener('click', event => {
   if (event.target.closest('[data-reset]')) return resetFilters();
   const card = event.target.closest('[data-product]');
@@ -470,17 +484,16 @@ $('grid').addEventListener('click', event => {
 
 // ---------- Карточка товара ----------
 let closingFromHistory = false;
-function openProduct(article, colorIndex = null) {
+function openProduct(article, colorIndex = null, { enter = 0 } = {}) {
   const p = state.byArticle.get(article);
   if (!p) return;
   const same = state.current?.article === article;
   if (!same) state.draft = new Map();
   const preferred = () => {
+    if (state.hit) { const i = p.colors.findIndex(c => c.lines.some(l => l.sku === state.hit)); if (i >= 0) return i; }
     const size = state.f.size;
-    const index = p.colors.findIndex(c => size ? c.lines.some(l => l.size === size && (!canOrder() || l.store <= 0) && l.wh > 0)
-      : state.f.need === 'network' ? c.lines.some(l => (!canOrder() || l.store <= 0) && l.wh <= 0 && l.netQty > 0)
-      : canOrder() && state.f.need ? c.lines.some(l => l.store <= 0 && l.wh > 0) : c.photo != null);
-    return Math.max(0, index);
+    const i = p.colors.findIndex(c => c.wh > 0 && (!size.length || c.lines.some(l => size.includes(l.size) && l.wh > 0)));
+    return Math.max(0, i);
   };
   const ci = colorIndex ?? (same ? state.current.color : preferred());
   state.current = { article, color: ci };
@@ -490,65 +503,79 @@ function openProduct(article, colorIndex = null) {
   const storeView = canOrder();
   const ordering = storeView && stockFresh();
   const showNet = Boolean(state.stocks.network);
-  const rows = (c?.lines ?? []).map((l, i) => {
+  const lines = (c?.lines ?? []).filter(l => !hasStock() || l.wh > 0 || l.store > 0);
+  const rows = lines.map(l => {
     const has = inCart(l.sku);
     const max = Math.max(0, (l.wh ?? 0) - has);
     const draft = Math.min(state.draft.get(l.sku) ?? 0, max);
     const need = storeView && l.store <= 0 && l.wh > 0;
-    return `<tr class="${need ? 'need' : ''} ${l.sku === state.hit ? 'hit' : ''}"><td>${safe(sizeName(l.size))}</td>
-      ${storeView ? `<td class="${numClass(l.store)}">${qty(l.store)}</td>` : ''}
-      <td class="${numClass(l.wh)}">${qty(l.wh)}${has ? `<span class="incart">в корзине ${has}</span>` : ''}</td>
-      ${showNet ? `<td class="${l.netQty ? 'net' : 'zero'}" title="${safe(netTitle(l))}">${qty(l.netQty)}</td>` : ''}
-      ${ordering ? `<td>${max > 0 ? `<span class="stepper"><button type="button" data-step="-1" data-row="${i}" aria-label="Меньше, размер ${safe(sizeName(l.size))}">−</button><input type="number" inputmode="numeric" min="0" max="${max}" value="${draft}" data-row="${i}" aria-label="Количество, размер ${safe(sizeName(l.size))}"><button type="button" data-step="1" data-row="${i}" aria-label="Больше, размер ${safe(sizeName(l.size))}">+</button></span>` : '<span class="zero">—</span>'}</td>` : ''}
-    </tr>`;
+    const row = c.lines.indexOf(l);
+    const stat = (label, value) => value == null ? '' : `<span><small>${label}</small><b class="${value > 0 ? '' : 'zero'}">${qty(value)}</b></span>`;
+    return `<li class="size-row ${need ? 'need' : ''} ${l.sku === state.hit ? 'hit' : ''} ${!(l.wh > 0) ? 'off' : ''}">
+      <span class="size-name">${safe(sizeName(l.size))}${need ? '<i class="need-dot" title="Нет в вашем магазине"></i>' : ''}</span>
+      <span class="size-stats">${storeView ? stat('У вас', l.store) : ''}${stat('Лиственная', l.wh)}${showNet ? `<span title="${safe(netTitle(l))}"><small>Сеть</small><b class="${l.netQty > 0 ? '' : 'zero'}">${qty(l.netQty)}</b></span>` : ''}</span>
+      <span class="size-order">${has ? `<span class="incart">в корзине ${has}</span>` : ''}${ordering && max > 0
+        ? `<span class="stepper ${draft ? 'on' : ''}"><button type="button" data-step="-1" data-row="${row}" aria-label="Меньше, размер ${safe(sizeName(l.size))}" ${draft ? '' : 'disabled'}>−</button><input type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="${max}" value="${draft}" data-row="${row}" aria-label="Количество, размер ${safe(sizeName(l.size))}"><button type="button" data-step="1" data-row="${row}" aria-label="Больше, размер ${safe(sizeName(l.size))}" ${draft >= max ? 'disabled' : ''}>+</button></span>`
+        : ordering ? '<span class="none">нет на складе</span>' : ''}</span>
+    </li>`;
   }).join('');
-  const needCount = storeView ? (c?.lines ?? []).filter(l => l.store <= 0 && l.wh > 0 && inCart(l.sku) < l.wh).length : 0;
-  const swatches = p.colors.length > 1 || p.colors[0]?.color ? p.colors.map((x, i) => {
+  const needCount = storeView ? lines.filter(l => l.store <= 0 && l.wh > 0 && inCart(l.sku) < l.wh).length : 0;
+  const swatches = p.colors.length > 1 ? p.colors.map((x, i) => {
     const src = photoSrc('thumb', x.photo);
-    const total = x.lines.reduce((t, l) => t + Math.max(0, l.wh ?? 0), 0);
-    return `<button type="button" class="swatch" data-color="${i}" aria-pressed="${i === ci}">${src ? `<img src="${safe(src)}" alt="" loading="lazy">` : '<span class="dot"></span>'}<span>${safe(x.color || 'Без цвета')}<small>Лиственная: ${fmt.format(total)}</small></span></button>`;
+    return `<button type="button" class="swatch ${x.wh > 0 ? '' : 'off'}" data-color="${i}" aria-pressed="${i === ci}" aria-label="${safe(x.color || 'Без цвета')}, на Лиственной ${x.wh} шт.">${src ? `<img src="${safe(src)}" alt="" loading="lazy">` : `<span class="dot">${safe((x.color || '?').slice(0, 2))}</span>`}</button>`;
   }).join('') : '';
+  const nav = d => `<button type="button" class="pd-nav ${d < 0 ? 'prev' : 'next'}" data-nav="${d}" aria-label="${d < 0 ? 'Предыдущий' : 'Следующий'} товар" ${d < 0 ? (position <= 0 ? 'disabled' : '') : (position < 0 || position >= state.filtered.length - 1 ? 'disabled' : '')}>${d < 0 ? icons.prev : icons.next}</button>`;
+  const scrollBefore = same && productDialog.open ? productDialog.querySelector('.pd-scroll')?.scrollTop ?? 0 : 0;
   productDialog.innerHTML = `
-    <div class="modal-head">
-      <div>
-        <h2 id="product-title" tabindex="-1">${safe(p.n)}</h2>
-        <div class="meta"><button type="button" class="copy code" data-copy="${safe(p.a)}" aria-label="Скопировать артикул ${safe(p.a)}">${safe(p.a)}${icons.copy}</button><span>· ${safe(p.c)}</span>${p.s ? `<span>· ${safe(p.s)}</span>` : ''}<span class="copy-status" role="status"></span></div>
-      </div>
-      <div class="head-actions">
-        <button type="button" class="icon-btn" data-share aria-label="Скопировать ссылку на товар" title="Ссылка на товар">${icons.link}</button>
-        <button type="button" class="icon-btn" data-nav="-1" aria-label="Предыдущий товар" ${position <= 0 ? 'disabled' : ''}>${icons.prev}</button>
-        <button type="button" class="icon-btn" data-nav="1" aria-label="Следующий товар" ${position < 0 || position >= state.filtered.length - 1 ? 'disabled' : ''}>${icons.next}</button>
-        <button type="button" class="close" data-close aria-label="Закрыть">×</button>
+    <div class="pd-float">
+      <button type="button" class="round" data-share aria-label="Скопировать ссылку на товар" title="Ссылка на товар">${icons.link}</button>
+      <button type="button" class="round" data-close aria-label="Закрыть">${icons.close}</button>
+    </div>
+    <div class="pd-scroll">
+      <div class="pd">
+        <div class="pd-media">
+          <div class="pd-photo">
+            ${photoMarkup(photo, 'detail', p.n, true)}
+            ${photoSrc('detail', photo) ? '<button type="button" class="pd-zoom" data-zoom aria-label="Открыть фото на весь экран"></button>' : ''}
+            ${nav(-1)}${nav(1)}
+            ${position >= 0 ? `<span class="pd-pos">${position + 1} / ${fmt.format(state.filtered.length)}</span>` : ''}
+          </div>
+          ${swatches ? `<div class="pd-colors" role="group" aria-label="Цвет">${swatches}</div>` : ''}
+        </div>
+        <div class="pd-info">
+          <p class="pd-eyebrow">${[p.s, ...p.c.split(' · ')].filter(Boolean).map(safe).join(' · ')}</p>
+          <h2 id="product-title" tabindex="-1">${safe(p.n)}</h2>
+          <button type="button" class="pd-code" data-copy="${safe(p.a)}" aria-label="Скопировать артикул ${safe(p.a)}">${safe(p.a)}${icons.copy}<span class="copy-status" role="status"></span></button>
+          <p class="pd-color">Цвет <b>${safe(c?.color || '—')}</b>${c?.photo == null && p.photo != null ? ' · фото модели' : ''}</p>
+          ${rows ? `<div class="pd-sizes-head"><h3>Размеры</h3>${storeView ? '<span><i class="need-dot"></i>нет у вас</span>' : ''}</div><ul class="size-list">${rows}</ul>`
+            : '<p class="detail-note">Этого цвета сейчас нет на Лиственной.</p>'}
+          ${storeView && !stockFresh() ? '<p class="inline-msg bad">Остатки устарели — заказ откроется после следующей выгрузки из 1С.</p>' : ''}
+          <p class="inline-msg" role="status"></p>
+          ${networkBlock(c)}
+        </div>
       </div>
     </div>
-    <div class="detail">
-      <div class="detail-media">
-        <div class="photo detail-image">${photoMarkup(photo, 'detail', p.n, true)}${photoSrc('detail', photo) ? '<button type="button" class="zoom" data-zoom aria-label="Увеличить фото"><span aria-hidden="true">⤢</span></button>' : ''}</div>
-        ${c && c.photo == null && p.photo != null ? '<p class="detail-note">Для этого цвета нет фото — показано фото модели.</p>' : ''}
-        ${swatches ? `<div class="swatches" role="group" aria-label="Цвет">${swatches}</div>` : ''}
-      </div>
-      <div class="detail-copy">
-        ${rows ? `<table class="matrix"><thead><tr><th>Размер</th>${storeView ? '<th>Мой магазин</th>' : ''}<th>Лиственная</th>${showNet ? '<th>Сеть</th>' : ''}${ordering ? '<th>Заказать</th>' : ''}</tr></thead><tbody>${rows}</tbody></table>
-          ${storeView ? '<p class="legend"><span><i></i>нет в магазине, есть на Лиственной</span></p>' : ''}`
-          : '<p class="detail-note">Размеры появятся после выгрузки из 1С.</p>'}
-        ${storeView && !stockFresh() ? '<p class="inline-msg bad">Остатки устарели — заказ откроется после следующей выгрузки из 1С.</p>' : ''}
-        ${ordering && rows ? `<div class="order-bar">
-            ${needCount ? `<button type="button" class="secondary" data-fill>Недостающие по 1 шт. (${needCount})</button>` : ''}
-            <button type="button" class="primary" data-add disabled>Выберите количество</button>
-          </div>` : ''}
-        <p class="inline-msg" role="status"></p>
-        ${networkBlock(c)}
-        ${storeView ? `<button type="button" class="link" data-cart>Открыть корзину · ${fmt.format(cartTotal())} шт.</button>` : ''}
-      </div>
-    </div>`;
+    ${ordering && rows ? `<div class="pd-bar">
+      ${needCount ? `<button type="button" class="secondary" data-fill>Всё недостающее · ${needCount}</button>` : ''}
+      <button type="button" class="primary" data-add disabled>Выберите количество</button>
+    </div>` : ''}`;
   updateDraftButton();
   if (!productDialog.open) {
+    state.pageScroll = window.scrollY;
     productDialog.showModal();
     try { history.pushState({ modal: 'product' }, ''); } catch { /* без истории */ }
   }
+  const scroller = productDialog.querySelector('.pd-scroll');
+  scroller.scrollTop = scrollBefore;
+  if (enter) {
+    scroller.style.transition = 'none';
+    scroller.style.transform = `translateX(${enter * 28}%)`;
+    scroller.style.opacity = '0';
+    requestAnimationFrame(() => requestAnimationFrame(() => { scroller.style.transition = ''; scroller.style.transform = ''; scroller.style.opacity = ''; }));
+  }
   writeHash();
-  if (!same) { productDialog.scrollTop = 0; $('product-title').focus({ preventScroll: true }); }
-  productDialog.querySelector('tr.hit')?.scrollIntoView({ block: 'center' });
+  if (!same) $('product-title').focus({ preventScroll: true });
+  productDialog.querySelector('.size-row.hit')?.scrollIntoView({ block: 'center' });
 }
 // ---------- Остатки других магазинов ----------
 function netTitle(l) {
@@ -558,17 +585,17 @@ function netTitle(l) {
 function networkBlock(c) {
   const locs = state.stocks.network?.locations;
   if (!locs?.length || !c) return '';
-  const lines = c.lines;
+  const lines = c.lines.filter(l => l.netQty > 0);
   const rows = locs.map((loc, i) => ({ loc, i, counts: lines.map(l => (l.net ?? []).find(([j]) => j === i)?.[1] ?? 0) }))
     .filter(r => r.counts.some(Boolean))
     .sort((a, b) => b.counts.reduce((t, q) => t + q, 0) - a.counts.reduce((t, q) => t + q, 0));
-  if (!rows.length) return '<div class="network"><h3>Магазины сети</h3><p>Этого цвета нет в других магазинах.</p></div>';
+  if (!rows.length) return '';
   const storeView = canOrder();
-  return `<div class="network"><h3>Магазины сети</h3><p>${storeView ? 'Красным — размеры, которых нет у вас. «Попросить» готовит сообщение для директора магазина.' : 'Остатки магазинов по последней выгрузке из 1С.'}</p>
+  return `<details class="pd-network"><summary><span>В магазинах сети</span><small>${rows.length} ${plural(rows.length, 'магазин', 'магазина', 'магазинов')}</small></summary>
     <div class="table-wrap"><table class="data net-table"><thead><tr><th>Магазин</th>${lines.map(l => `<th class="n">${safe(sizeName(l.size))}</th>`).join('')}${storeView ? '<th></th>' : ''}</tr></thead><tbody>
     ${rows.map(r => `<tr><td>${safe(r.loc.name)}</td>${r.counts.map((q, k) => `<td class="n ${!q ? 'zero' : storeView && lines[k].store <= 0 ? 'hot' : ''}">${q || '·'}</td>`).join('')}
-      ${storeView ? `<td><button type="button" class="secondary small" data-ask="${r.i}">Попросить</button></td>` : ''}</tr>`).join('')}
-    </tbody></table></div></div>`;
+      ${storeView ? `<td><button type="button" class="ghost small" data-ask="${r.i}">Попросить</button></td>` : ''}</tr>`).join('')}
+    </tbody></table></div></details>`;
 }
 function askText(p, c, i) {
   const loc = state.stocks.network.locations[i];
@@ -579,17 +606,13 @@ function askText(p, c, i) {
     + lines.map(l => `${sizeName(l.size)} — 1 шт.`).join(', ')
     + `. По остаткам на сайте у вас есть${state.updated ? ` (выгрузка ${clock.format(new Date(state.updated))})` : ''}. Сможете передать?`;
 }
-function draftTotal() {
-  const p = state.byArticle.get(state.current?.article);
-  if (!p) return 0;
-  return [...state.draft.values()].reduce((t, n) => t + n, 0);
-}
+function draftTotal() { return [...state.draft.values()].reduce((t, n) => t + n, 0); }
 function updateDraftButton() {
   const button = productDialog.querySelector('[data-add]');
   if (!button) return;
   const n = draftTotal();
   button.disabled = !n;
-  button.textContent = n ? `Добавить в корзину · ${fmt.format(n)} шт.` : 'Выберите количество';
+  button.textContent = n ? `В корзину · ${fmt.format(n)} шт.` : 'Выберите количество';
 }
 function currentLines() {
   const p = state.byArticle.get(state.current.article);
@@ -602,27 +625,48 @@ function setDraft(row, value) {
   const n = Math.max(0, Math.min(max, Number.isFinite(value) ? Math.trunc(value) : 0));
   if (n) state.draft.set(l.sku, n); else state.draft.delete(l.sku);
   const input = productDialog.querySelector(`input[data-row="${row}"]`);
-  if (input) input.value = n;
+  if (input) {
+    input.value = n;
+    const stepper = input.closest('.stepper');
+    stepper.classList.toggle('on', n > 0);
+    stepper.querySelector('[data-step="-1"]').disabled = !n;
+    stepper.querySelector('[data-step="1"]').disabled = n >= max;
+  }
   updateDraftButton();
+}
+// Переход к соседнему товару с анимацией (стрелки, клавиатура, свайп).
+function goTo(direction) {
+  const i = state.filtered.findIndex(x => x.a === state.current?.article) + direction;
+  const next = state.filtered[i];
+  if (!next) return false;
+  const scroller = productDialog.querySelector('.pd-scroll');
+  scroller.style.transform = `translateX(${-direction * 28}%)`;
+  scroller.style.opacity = '0';
+  setTimeout(() => openProduct(next.a, null, { enter: direction }), 140);
+  return true;
+}
+function closeProduct() {
+  if (!productDialog.open) return;
+  productDialog.classList.add('closing');
+  setTimeout(() => { productDialog.classList.remove('closing'); productDialog.style.transform = ''; productDialog.close(); }, 200);
 }
 productDialog.addEventListener('click', async event => {
   if (event.target === productDialog) {
     const r = productDialog.getBoundingClientRect();
-    if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) productDialog.close();
+    if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) closeProduct();
     return;
   }
   const b = event.target.closest('button');
   if (!b) return;
-  const message = productDialog.querySelector('.inline-msg');
-  if (b.hasAttribute('data-close')) productDialog.close();
-  else if (b.dataset.nav) {
-    const i = state.filtered.findIndex(x => x.a === state.current.article) + Number(b.dataset.nav);
-    if (state.filtered[i]) openProduct(state.filtered[i].a);
-  } else if (b.dataset.color) openProduct(state.current.article, Number(b.dataset.color));
+  const message = productDialog.querySelector('.inline-msg[role=status]:not(.bad)');
+  if (b.hasAttribute('data-close')) closeProduct();
+  else if (b.dataset.nav) goTo(Number(b.dataset.nav));
+  else if (b.dataset.color) openProduct(state.current.article, Number(b.dataset.color));
   else if (b.dataset.step) {
     const row = Number(b.dataset.row);
     const input = productDialog.querySelector(`input[data-row="${row}"]`);
     setDraft(row, (input.valueAsNumber || 0) + Number(b.dataset.step));
+    navigator.vibrate?.(8);
   } else if (b.hasAttribute('data-fill')) {
     const { c } = currentLines();
     c.lines.forEach((l, i) => { if (l.store <= 0 && l.wh > 0 && inCart(l.sku) < l.wh && !state.draft.get(l.sku)) setDraft(i, 1); });
@@ -636,23 +680,17 @@ productDialog.addEventListener('click', async event => {
     const added = addToCart(lines);
     state.draft = new Map();
     openProduct(p.a);
-    const msg = productDialog.querySelector('.inline-msg');
-    msg.className = 'inline-msg ok';
-    msg.textContent = `Добавлено ${fmt.format(added)} шт. В корзине всего ${fmt.format(cartTotal())} шт.`;
+    notify(`В корзине +${fmt.format(added)} шт.`);
     renderBulk();
   } else if (b.dataset.copy) {
     const ok = await copyText(b.dataset.copy);
-    productDialog.querySelector('.copy-status').textContent = ok ? ' Скопировано' : ' Не удалось скопировать';
+    productDialog.querySelector('.copy-status').textContent = ok ? 'скопирован' : '';
   } else if (b.hasAttribute('data-share')) {
     const ok = await copyText(location.href);
-    message.className = 'inline-msg ' + (ok ? 'ok' : 'bad');
-    message.textContent = ok ? 'Ссылка на товар скопирована — её можно отправить в Telegram.' : 'Не удалось скопировать ссылку.';
+    notify(ok ? 'Ссылка на товар скопирована' : 'Не удалось скопировать ссылку');
   } else if (b.hasAttribute('data-zoom')) {
-    const img = productDialog.querySelector('.detail-image img');
+    const img = productDialog.querySelector('.pd-photo img');
     showPhoto(img.currentSrc || img.src, state.byArticle.get(state.current.article).n);
-  } else if (b.hasAttribute('data-cart')) {
-    productDialog.close();
-    openCart();
   } else if (b.dataset.ask) {
     const { p, c } = currentLines();
     const text = askText(p, c, Number(b.dataset.ask));
@@ -660,8 +698,7 @@ productDialog.addEventListener('click', async event => {
       try { await navigator.share({ text }); return; } catch (err) { if (err?.name === 'AbortError') return; }
     }
     const ok = await copyText(text);
-    message.className = 'inline-msg ' + (ok ? 'ok' : 'bad');
-    message.textContent = ok ? 'Сообщение скопировано — вставьте его в чат магазина.' : 'Не удалось скопировать: ' + text;
+    notify(ok ? 'Сообщение скопировано — вставьте его в чат магазина' : 'Не удалось скопировать');
   }
 });
 productDialog.addEventListener('change', event => {
@@ -675,14 +712,17 @@ productDialog.addEventListener('input', event => {
     const l = c.lines[Number(input.dataset.row)];
     const n = Math.max(0, Math.min(l.wh - inCart(l.sku), Math.trunc(input.valueAsNumber)));
     if (n) state.draft.set(l.sku, n); else state.draft.delete(l.sku);
+    input.closest('.stepper').classList.toggle('on', n > 0);
     updateDraftButton();
   }
 });
+productDialog.addEventListener('focusin', event => { if (event.target.matches('input[data-row]')) event.target.select(); });
 productDialog.addEventListener('keydown', event => {
-  if (event.target.matches('input')) return;
-  if (event.key === 'ArrowLeft') productDialog.querySelector('[data-nav="-1"]:not(:disabled)')?.click();
-  if (event.key === 'ArrowRight') productDialog.querySelector('[data-nav="1"]:not(:disabled)')?.click();
+  if (event.target.matches('input')) { if (event.key === 'Enter') event.target.blur(); return; }
+  if (event.key === 'ArrowLeft') goTo(-1);
+  if (event.key === 'ArrowRight') goTo(1);
 });
+productDialog.addEventListener('cancel', event => { event.preventDefault(); closeProduct(); });
 productDialog.addEventListener('close', () => {
   state.current = null;
   state.hit = null;
@@ -690,25 +730,52 @@ productDialog.addEventListener('close', () => {
   writeHash();
   if (!closingFromHistory && history.state?.modal === 'product') { try { history.back(); } catch { /* ignore */ } }
   closingFromHistory = false;
+  // Возвращаем страницу туда, где был товар (браузер при «назад» может прыгнуть наверх).
+  const y = state.pageScroll ?? window.scrollY;
+  requestAnimationFrame(() => window.scrollTo(0, y));
+  setTimeout(() => { if (Math.abs(window.scrollY - y) > 2) window.scrollTo(0, y); }, 80);
+  updateCartFab();
 });
 window.addEventListener('popstate', () => {
   if (productDialog.open) { closingFromHistory = true; productDialog.close(); }
 });
-// Свайп вправо закрывает карточку на телефоне.
+// Свайпы на телефоне: влево/вправо — соседний товар (карточка едет за пальцем), вниз от верха — закрыть.
 {
-  let start = null;
+  let t = null;
   productDialog.addEventListener('touchstart', e => {
-    start = e.touches.length === 1 && !e.target.closest('input,.stepper,.swatches,.matrix') ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+    if (e.touches.length !== 1 || e.target.closest('input,.stepper,.pd-colors,.table-wrap')) { t = null; return; }
+    const scroller = productDialog.querySelector('.pd-scroll');
+    t = { x: e.touches[0].clientX, y: e.touches[0].clientY, axis: null, dx: 0, dy: 0, top: scroller.scrollTop <= 0, scroller };
   }, { passive: true });
-  productDialog.addEventListener('touchend', e => {
-    if (!start) return;
-    const dx = e.changedTouches[0].clientX - start.x, dy = e.changedTouches[0].clientY - start.y;
-    if (Math.abs(dx) > 90 && Math.abs(dx) > 2.2 * Math.abs(dy)) {
-      const next = productDialog.querySelector(`[data-nav="${dx < 0 ? 1 : -1}"]:not(:disabled)`);
-      if (next) next.click(); else if (dx > 0) productDialog.close();
+  productDialog.addEventListener('touchmove', e => {
+    if (!t) return;
+    t.dx = e.touches[0].clientX - t.x; t.dy = e.touches[0].clientY - t.y;
+    if (!t.axis && Math.hypot(t.dx, t.dy) > 10) t.axis = Math.abs(t.dx) > Math.abs(t.dy) * 1.2 ? 'x' : t.dy > 0 && t.top ? 'y' : 'scroll';
+    if (t.axis === 'x') {
+      e.preventDefault();
+      t.scroller.style.transition = 'none';
+      t.scroller.style.transform = `translateX(${t.dx}px)`;
+      t.scroller.style.opacity = String(1 - Math.min(0.5, Math.abs(t.dx) / 700));
+    } else if (t.axis === 'y' && matchMedia('(max-width: 760px)').matches) {
+      e.preventDefault();
+      productDialog.style.transition = 'none';
+      productDialog.style.transform = `translateY(${Math.max(0, t.dy)}px)`;
     }
-    start = null;
-  }, { passive: true });
+  }, { passive: false });
+  productDialog.addEventListener('touchend', () => {
+    if (!t) return;
+    const { axis, dx, dy, scroller } = t;
+    t = null;
+    scroller.style.transition = '';
+    productDialog.style.transition = '';
+    if (axis === 'x') {
+      if (Math.abs(dx) > 70 && goTo(dx < 0 ? 1 : -1)) return;
+      scroller.style.transform = ''; scroller.style.opacity = '';
+    } else if (axis === 'y') {
+      if (dy > 110) closeProduct();
+      else productDialog.style.transform = '';
+    }
+  });
 }
 
 // ---------- Просмотр фото: колесо, щипок, двойной тап, перетаскивание ----------
@@ -956,7 +1023,6 @@ async function loadOrders({ quiet = false } = {}) {
     state.ordersLoaded = true;
     const typing = $('order-list').contains(document.activeElement) && document.activeElement.matches('input');
     if (!quiet || (state.active !== 'orders') || !typing) renderOrders(); else updateOrdersBadge();
-    if (isWarehouse()) renderSummary();
   } catch (err) {
     if (version === orderRead && !quiet) $('order-list').innerHTML = `<div class="empty">${safe(err.message)}</div>`;
   } finally {
@@ -1042,6 +1108,7 @@ function showSection(section) {
     else $(name + '-tab').removeAttribute('aria-current');
   }
   if (section === 'orders' && state.user) void loadOrders();
+  updateCartFab();
   writeHash();
   window.scrollTo({ top: 0 });
 }
@@ -1051,8 +1118,8 @@ function updateAccount() {
   $('cart-button').hidden = !canOrder();
   $('catalog-tab').hidden = isWarehouse() && state.stockDenied;
   $('orders-title').textContent = canOrder() ? 'Заявки моего магазина' : 'Заявки магазинов на Лиственную';
-  $('in-stock').hidden = false;
-  if (!canOrder() && state.f.need && state.f.need !== 'negative') state.f.need = '';
+  if (!canOrder()) state.f.absent = false;
+  updateCartFab();
 }
 function renderSync() {
   const pill = $('sync');
@@ -1096,7 +1163,6 @@ function selectDemoLocation(id) {
   renderSync();
   state.ordersLoaded = false;
   void loadOrders({ quiet: true });
-  renderSummary();
   renderCatalog();
   if (role === 'warehouse') showSection('orders');
   else if (state.active === 'orders') void loadOrders();
@@ -1111,7 +1177,6 @@ async function refreshStock() {
       state.updated = stock.updatedAt;
       state.stocks = { warehouse: stock.warehouse ?? [], store: stock.store ?? [], network: stock.network ?? null };
       buildIndex();
-      renderSummary();
       renderCatalog();
       if (state.current && productDialog.open) openProduct(state.current.article);
     }
@@ -1402,6 +1467,14 @@ $('scan-manual').addEventListener('submit', async event => {
   if (await lookupCode(value, { quiet: true })) { scanDialog.close(); return; }
   scanStatus(barcodes.map?.size ? `«${value}» не найден. Проверьте цифры или ищите по артикулу.` : `«${value}» не найден: база штрихкодов ещё не выгружена из 1С. Можно ввести артикул.`);
 });
+
+// Шапка не едет за прокруткой; когда она скрылась, корзина доступна плавающей кнопкой.
+let headerVisible = true;
+function updateCartFab() {
+  $('cart-fab').hidden = !(canOrder() && cartTotal() > 0 && !headerVisible && state.active === 'catalog');
+}
+new IntersectionObserver(entries => { headerVisible = entries[0].isIntersecting; updateCartFab(); }).observe(document.querySelector('.bar'));
+$('cart-fab').onclick = () => openCart();
 
 // ---------- Клавиатура ----------
 document.addEventListener('keydown', event => {

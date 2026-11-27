@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
   <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0e0e10">
@@ -40,53 +40,20 @@
     <p id="notice" class="notice" role="status" hidden></p>
 
     <section id="catalog" aria-label="Ассортимент">
-      <div id="summary" class="summary" aria-label="Сводка"></div>
-
       <div class="toolbar">
         <label class="search">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
-          <input id="search" type="search" placeholder="Артикул, название, цвет или штрихкод" aria-label="Поиск товара" autocomplete="off" enterkeyhint="search">
+          <input id="search" type="search" placeholder="Артикул, название или штрихкод" aria-label="Поиск товара" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search">
+          <button type="button" id="search-clear" class="search-clear" aria-label="Очистить поиск" hidden>×</button>
           <kbd aria-hidden="true">/</kbd>
           <button type="button" id="scan-button" class="scan-btn" aria-label="Сканировать штрихкод камерой" title="Сканировать штрихкод"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 8v8M10 8v8M13 8v8M17 8v8"/></svg></button>
         </label>
-        <label class="sort"><span class="sr">Сортировка</span>
-          <select id="sort">
-            <option value="">По умолчанию</option>
-            <option value="new">Сначала новый сезон</option>
-            <option value="wh">Больше на Лиственной</option>
-            <option value="need">Больше недостающих размеров</option>
-            <option value="low">Меньше в магазине</option>
-            <option value="name">По названию</option>
-          </select>
-        </label>
+        <button type="button" id="filter-button" class="filter-button" aria-haspopup="dialog">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>
+          <span>Фильтры</span><b id="filter-count" hidden>0</b>
+        </button>
       </div>
-
-      <div class="filters" role="group" aria-label="Фильтры">
-        <div class="seg" role="group" aria-label="Для кого">
-          <button type="button" data-aud="" aria-pressed="true">Все</button>
-          <button type="button" data-aud="Взрослые" aria-pressed="false">Взрослые</button>
-          <button type="button" data-aud="Дети" aria-pressed="false">Дети</button>
-        </div>
-        <div class="chip-row" role="group" aria-label="Тип товара">
-          <button type="button" class="chip" data-kind="Обувь" aria-pressed="false">Обувь</button>
-          <button type="button" class="chip" data-kind="Одежда" aria-pressed="false">Одежда</button>
-          <button type="button" class="chip" data-kind="Аксессуары" aria-pressed="false">Аксессуары</button>
-        </div>
-        <label class="pick"><span class="sr">Сезон</span><select id="season"><option value="">Все сезоны</option></select></label>
-        <label class="pick"><span class="sr">Размер</span><select id="size"><option value="">Все размеры</option></select></label>
-        <label class="pick need-pick"><span class="sr">Что нужно магазину</span>
-          <select id="need">
-            <option value="">Все товары</option>
-            <option value="size">Недостающие размеры</option>
-            <option value="article">Нет в магазине</option>
-            <option value="network">Нет на Лиственной, есть в сети</option>
-            <option value="negative">Отрицательные остатки</option>
-          </select>
-        </label>
-        <button type="button" class="chip toggle" id="in-stock" aria-pressed="false">Есть на Лиственной</button>
-        <button type="button" class="link" id="reset" hidden>Сбросить</button>
-      </div>
-
+      <div id="active-filters" class="active-filters" hidden></div>
       <div class="heading">
         <h2>Ассортимент <span id="result-count" aria-live="polite"></span></h2>
         <button id="bulk-add" class="primary small" type="button" hidden></button>
@@ -109,7 +76,13 @@
     </section>
   </main>
 
-  <dialog id="product-dialog" aria-labelledby="product-title"></dialog>
+  <dialog id="product-dialog" class="product-dialog" aria-labelledby="product-title"></dialog>
+  <dialog id="filter-dialog" class="sheet-dialog" aria-labelledby="filter-title">
+    <div class="sheet-head"><h2 id="filter-title">Фильтры</h2><button type="button" class="round" id="filter-close" aria-label="Закрыть"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <div id="filter-body" class="sheet-body"></div>
+    <div class="sheet-foot"><button type="button" class="secondary" id="filter-reset">Сбросить</button><button type="button" class="primary" id="filter-apply">Показать</button></div>
+  </dialog>
+  <button type="button" id="cart-fab" class="cart-fab" hidden aria-label="Открыть корзину"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h2l2.6 12h10.9l2.5-8H6.3M9 20h.01M17 20h.01"/></svg>Корзина<b id="cart-fab-count">0</b></button>
   <dialog id="photo-dialog" aria-label="Фотография товара">
     <div class="viewer-bar"><span id="photo-title"></span><button class="close" id="photo-close" type="button" aria-label="Закрыть фото">×</button></div>
     <div class="viewer-frame"><img id="photo-full" alt=""></div>
