@@ -569,10 +569,15 @@ function openProduct(article, colorIndex = null, { enter = 0 } = {}) {
   scroller.scrollTop = scrollBefore;
   if (enter) {
     scroller.style.transition = 'none';
-    scroller.style.transform = `translateX(${enter * 28}%)`;
+    scroller.style.transform = `translate3d(${enter * scroller.clientWidth * 0.55}px, 0, 0)`;
     scroller.style.opacity = '0';
-    requestAnimationFrame(() => requestAnimationFrame(() => { scroller.style.transition = ''; scroller.style.transform = ''; scroller.style.opacity = ''; }));
+    void scroller.offsetWidth;
+    scroller.style.transition = `transform ${MOTION.enter}ms ${MOTION.ease}, opacity ${MOTION.enter * 0.7}ms ease-out`;
+    scroller.style.transform = '';
+    scroller.style.opacity = '';
+    setTimeout(() => { scroller.style.transition = ''; }, MOTION.enter);
   }
+  preloadNeighbors(position);
   writeHash();
   if (!same) $('product-title').focus({ preventScroll: true });
   productDialog.querySelector('.size-row.hit')?.scrollIntoView({ block: 'center' });
@@ -634,21 +639,51 @@ function setDraft(row, value) {
   }
   updateDraftButton();
 }
-// Переход к соседнему товару с анимацией (стрелки, клавиатура, свайп).
-function goTo(direction) {
+// ---------- Движение карточки: единые кривые и длительности ----------
+const MOTION = { ease: 'cubic-bezier(.22, 1, .36, 1)', sheet: 'cubic-bezier(.32, .72, 0, 1)', spring: 'cubic-bezier(.2, .9, .25, 1.12)', leave: 220, enter: 380, close: 320, back: 420 };
+const isPhone = () => matchMedia('(max-width: 760px)').matches;
+// Заранее загружаем фото соседних товаров, чтобы при свайпе они появлялись без мигания.
+function preloadNeighbors(position) {
+  for (const i of [position - 1, position + 1]) {
+    const p = state.filtered[i];
+    const src = p && photoSrc('detail', p.colors.find(c => c.wh > 0)?.photo ?? p.photo);
+    if (src && !src.startsWith('data:')) { const img = new Image(); img.decoding = 'async'; img.src = src; }
+  }
+}
+// Переход к соседнему товару: текущая карточка уезжает в сторону свайпа, новая въезжает с другой стороны.
+function goTo(direction, { velocity = 0 } = {}) {
   const i = state.filtered.findIndex(x => x.a === state.current?.article) + direction;
   const next = state.filtered[i];
-  if (!next) return false;
   const scroller = productDialog.querySelector('.pd-scroll');
-  scroller.style.transform = `translateX(${-direction * 28}%)`;
+  if (!next) { springBack(scroller); return false; }
+  const duration = Math.round(Math.max(150, MOTION.leave - Math.abs(velocity) * 60));
+  scroller.style.transition = `transform ${duration}ms cubic-bezier(.4, 0, 1, 1), opacity ${duration}ms ease-in`;
+  scroller.style.transform = `translate3d(${-direction * scroller.clientWidth * 0.6}px, 0, 0)`;
   scroller.style.opacity = '0';
-  setTimeout(() => openProduct(next.a, null, { enter: direction }), 140);
+  setTimeout(() => openProduct(next.a, null, { enter: direction }), duration);
   return true;
 }
-function closeProduct() {
-  if (!productDialog.open) return;
+function springBack(el, transform = '') {
+  el.style.transition = `transform ${MOTION.back}ms ${MOTION.spring}, opacity ${MOTION.back}ms ease`;
+  el.style.transform = transform;
+  el.style.opacity = '';
+  setTimeout(() => { el.style.transition = ''; }, MOTION.back);
+}
+// Закрытие: шторка уезжает вниз с текущей позиции (с учётом скорости свайпа), фон плавно светлеет.
+function closeProduct({ velocity = 0 } = {}) {
+  if (!productDialog.open || productDialog.classList.contains('closing')) return;
+  const phone = isPhone();
+  const duration = Math.round(phone ? Math.max(200, MOTION.close - velocity * 90) : 220);
+  productDialog.style.setProperty('--close', duration + 'ms');
   productDialog.classList.add('closing');
-  setTimeout(() => { productDialog.classList.remove('closing'); productDialog.style.transform = ''; productDialog.close(); }, 200);
+  productDialog.style.transition = `transform ${duration}ms ${phone ? MOTION.sheet : 'cubic-bezier(.4, 0, 1, 1)'}, opacity ${duration}ms ease`;
+  productDialog.style.transform = phone ? 'translate3d(0, 100%, 0)' : 'translate3d(0, 10px, 0) scale(.97)';
+  if (!phone) productDialog.style.opacity = '0';
+  setTimeout(() => {
+    productDialog.close();
+    productDialog.classList.remove('closing');
+    productDialog.style.transition = productDialog.style.transform = productDialog.style.opacity = '';
+  }, duration);
 }
 productDialog.addEventListener('click', async event => {
   if (event.target === productDialog) {
@@ -718,6 +753,8 @@ productDialog.addEventListener('input', event => {
 });
 productDialog.addEventListener('focusin', event => { if (event.target.matches('input[data-row]')) event.target.select(); });
 productDialog.addEventListener('keydown', event => {
+  // Esc перехватываем сами, чтобы окно закрывалось с анимацией, а не мгновенно.
+  if (event.key === 'Escape') { event.preventDefault(); closeProduct(); return; }
   if (event.target.matches('input')) { if (event.key === 'Enter') event.target.blur(); return; }
   if (event.key === 'ArrowLeft') goTo(-1);
   if (event.key === 'ArrowRight') goTo(1);
@@ -737,45 +774,60 @@ productDialog.addEventListener('close', () => {
   updateCartFab();
 });
 window.addEventListener('popstate', () => {
-  if (productDialog.open) { closingFromHistory = true; productDialog.close(); }
+  if (productDialog.open) { closingFromHistory = true; closeProduct(); }
 });
-// Свайпы на телефоне: влево/вправо — соседний товар (карточка едет за пальцем), вниз от верха — закрыть.
+// Свайпы: влево/вправо — соседний товар (карточка идёт за пальцем 1:1, у края списка — «резинка»),
+// вниз — закрыть (от верха содержимого или за полоску-ручку). Решение принимается по расстоянию и скорости.
 {
   let t = null;
+  const rubber = (d, limit) => limit * (1 - 1 / (Math.abs(d) / limit + 1)) * Math.sign(d);
   productDialog.addEventListener('touchstart', e => {
-    if (e.touches.length !== 1 || e.target.closest('input,.stepper,.pd-colors,.table-wrap')) { t = null; return; }
+    if (e.touches.length !== 1 || productDialog.classList.contains('closing') || e.target.closest('input,.stepper,.pd-colors,.table-wrap')) { t = null; return; }
     const scroller = productDialog.querySelector('.pd-scroll');
-    t = { x: e.touches[0].clientX, y: e.touches[0].clientY, axis: null, dx: 0, dy: 0, top: scroller.scrollTop <= 0, scroller };
+    const y = e.touches[0].clientY;
+    const handle = y - productDialog.getBoundingClientRect().top < 44;
+    t = { x: e.touches[0].clientX, y, axis: null, dx: 0, dy: 0, top: scroller.scrollTop <= 0 || handle, scroller, samples: [] };
   }, { passive: true });
   productDialog.addEventListener('touchmove', e => {
     if (!t) return;
+    const now = performance.now();
     t.dx = e.touches[0].clientX - t.x; t.dy = e.touches[0].clientY - t.y;
-    if (!t.axis && Math.hypot(t.dx, t.dy) > 10) t.axis = Math.abs(t.dx) > Math.abs(t.dy) * 1.2 ? 'x' : t.dy > 0 && t.top ? 'y' : 'scroll';
+    t.samples.push([now, t.dx, t.dy]);
+    while (t.samples.length > 2 && now - t.samples[0][0] > 100) t.samples.shift();
+    if (!t.axis && Math.hypot(t.dx, t.dy) > 8) t.axis = Math.abs(t.dx) > Math.abs(t.dy) * 1.15 ? 'x' : t.dy > 0 && t.top && isPhone() ? 'y' : 'scroll';
     if (t.axis === 'x') {
       e.preventDefault();
+      const i = state.filtered.findIndex(x => x.a === state.current?.article);
+      const edge = !state.filtered[i + (t.dx < 0 ? 1 : -1)];
+      const dx = edge ? rubber(t.dx, 90) : t.dx;
       t.scroller.style.transition = 'none';
-      t.scroller.style.transform = `translateX(${t.dx}px)`;
-      t.scroller.style.opacity = String(1 - Math.min(0.5, Math.abs(t.dx) / 700));
-    } else if (t.axis === 'y' && matchMedia('(max-width: 760px)').matches) {
+      t.scroller.style.transform = `translate3d(${dx}px, 0, 0)`;
+      t.scroller.style.opacity = String(1 - Math.min(0.35, Math.abs(dx) / t.scroller.clientWidth * 0.5));
+    } else if (t.axis === 'y') {
       e.preventDefault();
+      const dy = t.dy > 0 ? t.dy : rubber(t.dy, 40);
       productDialog.style.transition = 'none';
-      productDialog.style.transform = `translateY(${Math.max(0, t.dy)}px)`;
+      productDialog.style.transform = `translate3d(0, ${dy}px, 0)`;
     }
   }, { passive: false });
-  productDialog.addEventListener('touchend', () => {
+  const end = () => {
     if (!t) return;
-    const { axis, dx, dy, scroller } = t;
+    const { axis, dx, dy, scroller, samples } = t;
     t = null;
-    scroller.style.transition = '';
-    productDialog.style.transition = '';
+    const [t0, x0, y0] = samples[0] ?? [0, 0, 0];
+    const [t1, x1, y1] = samples.at(-1) ?? [1, 0, 0];
+    const vx = (x1 - x0) / Math.max(16, t1 - t0), vy = (y1 - y0) / Math.max(16, t1 - t0); // пикселей в мс
     if (axis === 'x') {
-      if (Math.abs(dx) > 70 && goTo(dx < 0 ? 1 : -1)) return;
-      scroller.style.transform = ''; scroller.style.opacity = '';
+      const commit = Math.abs(dx) > scroller.clientWidth * 0.22 || (Math.abs(vx) > 0.45 && Math.abs(dx) > 24 && Math.sign(vx) === Math.sign(dx));
+      if (commit && goTo(dx < 0 ? 1 : -1, { velocity: vx })) return;
+      springBack(scroller);
     } else if (axis === 'y') {
-      if (dy > 110) closeProduct();
-      else productDialog.style.transform = '';
+      if (dy > productDialog.clientHeight * 0.22 || (vy > 0.5 && dy > 30)) closeProduct({ velocity: vy });
+      else springBack(productDialog);
     }
-  });
+  };
+  productDialog.addEventListener('touchend', end);
+  productDialog.addEventListener('touchcancel', end);
 }
 
 // ---------- Просмотр фото: колесо, щипок, двойной тап, перетаскивание ----------

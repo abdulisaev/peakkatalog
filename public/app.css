@@ -272,10 +272,16 @@ dialog[open] { animation: pop .28s var(--ease); }
 /* ---------- Карточка товара ---------- */
 .product-dialog { width: min(1120px, calc(100% - 48px)); height: min(820px, calc(100dvh - 48px)); max-height: none; overflow: hidden; position: fixed; flex-direction: column; }
 .product-dialog[open] { display: flex; }
-.product-dialog.closing { animation: pop-out .2s var(--ease) forwards; }
-@keyframes pop-out { to { transform: translateY(14px) scale(.985); opacity: 0; } }
+.product-dialog { will-change: transform; }
+.product-dialog[open] { animation: pd-in .34s cubic-bezier(.22, 1, .36, 1); }
+@keyframes pd-in { from { transform: translate3d(0, 16px, 0) scale(.97); opacity: 0; } }
+.product-dialog[open]::backdrop { animation: fade-in .3s ease-out; }
+.product-dialog.closing::backdrop { animation: fade-out var(--close, .3s) ease forwards; }
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes fade-out { to { opacity: 0; } }
+.pd-scroll { will-change: transform, opacity; }
 .pd-float { position: absolute; top: 16px; right: 16px; z-index: 5; display: flex; gap: 8px; }
-.pd-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; transition: transform .24s var(--ease), opacity .24s; }
+.pd-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 .pd { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr); min-height: 100%; }
 .pd-media { position: sticky; top: 0; align-self: start; display: grid; gap: 14px; padding: 20px; }
 .pd-photo { position: relative; aspect-ratio: 1; background: #f4f4f6; border-radius: var(--r); overflow: hidden; display: grid; place-items: center; }
@@ -468,10 +474,8 @@ dialog[open] { animation: pop .28s var(--ease); }
   dialog { width: 100%; max-width: 100%; }
   /* Карточка товара — шторка снизу */
   .product-dialog, .cart-dialog, .scan-dialog { margin: auto 0 0; width: 100%; height: calc(100dvh - 8px); max-height: calc(100dvh - 8px); border-radius: 22px 22px 0 0; }
-  .product-dialog[open], .cart-dialog[open], .scan-dialog[open] { animation: sheet-up .38s var(--ease); }
-  .product-dialog.closing { animation: sheet-down .22s var(--ease) forwards; }
-  @keyframes sheet-up { from { transform: translateY(100%); } }
-  @keyframes sheet-down { to { transform: translateY(100%); } }
+  .product-dialog[open], .cart-dialog[open], .scan-dialog[open] { animation: sheet-up .46s cubic-bezier(.32, .72, 0, 1); }
+  @keyframes sheet-up { from { transform: translate3d(0, 100%, 0); } }
   .product-dialog::before { content: ""; position: absolute; z-index: 6; top: 7px; left: 50%; width: 38px; height: 5px; margin-left: -19px; border-radius: 3px; background: rgb(0 0 0 / .18); }
   .pd { grid-template-columns: minmax(0, 1fr); }
   .pd-media { position: static; padding: 0; gap: 12px; }
@@ -496,7 +500,7 @@ dialog[open] { animation: pop .28s var(--ease); }
   .pd-bar .secondary { padding: 0 16px; }
 
   .sheet-dialog { inset: auto 0 0 0; margin: auto 0 0; width: 100%; height: auto; max-height: 90dvh; border-radius: 22px 22px 0 0; }
-  .sheet-dialog[open] { animation: sheet-up .36s var(--ease); }
+  .sheet-dialog[open] { animation: sheet-up .42s cubic-bezier(.32, .72, 0, 1); }
   .sheet-head { padding: 18px 16px 6px 20px; }
   .sheet-body { padding: 0 20px 16px; }
   .sheet-foot { padding: 12px 16px max(14px, env(safe-area-inset-bottom)); }
