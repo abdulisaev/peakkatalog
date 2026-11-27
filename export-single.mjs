@@ -1,11 +1,11 @@
 // Собирает офлайн-демо в ОДИН HTML-файл (удобно отправлять в Telegram).
-// node export-single.mjs <остатки.json> <выход.html> [папка-с-фото]
+// node export-single.mjs <остатки.json> <выход.html> [папка-с-фото] [штрихкоды.json]
 // Остатки — формат public/data/stock-example.json. Фото — thumb-N.(jpg|webp) и detail-N.(jpg|webp),
 // по умолчанию public/photo (появляется после npm run build).
 import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
 import { resolve, extname } from 'node:path';
 
-const [stockPath = 'public/data/stock-example.json', output = 'PEAK-Catalog.html', photoDir = 'public/photo'] = process.argv.slice(2);
+const [stockPath = 'public/data/stock-example.json', output = 'PEAK-Catalog.html', photoDir = 'public/photo', barcodePath] = process.argv.slice(2);
 const read = name => readFileSync(resolve(name));
 const text = name => read(name).toString('utf8');
 const script = value => JSON.stringify(value).replaceAll('<', '\\u003c');
@@ -19,6 +19,8 @@ if (existsSync(photoDir)) {
   }
 }
 const data = { catalog: JSON.parse(text('public/data/catalog.json')), stock: JSON.parse(text(stockPath)) };
+// Штрихкоды — тело запроса /api/sync/barcodes ({rows: [[код, артикул, цвет, размер]]}) или просто массив строк.
+if (barcodePath) { const b = JSON.parse(text(barcodePath)); data.barcodes = Array.isArray(b) ? b : b.rows; }
 const logo = 'data:image/png;base64,' + read('public/logo.png').toString('base64');
 const mark = 'data:image/svg+xml;base64,' + read('public/mark.svg').toString('base64');
 

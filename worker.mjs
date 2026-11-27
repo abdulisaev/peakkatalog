@@ -104,6 +104,102 @@ async function getStock(db, user) {
     store: updated && user.role === 'store' ? JSON.parse(results.find(x => x.location === user.store).rows) : [] };
 }
 
+// Названия складов для сводки по сети: PEAK_LOCATION_NAMES ({"kadyrova":"Магазин Кадырова"}) или имена из PEAK_ACCESS.
+const defaultNames = { listvennaya: 'Лиственная', kadyrova: 'Кадырова', nalchik: 'Нальчик', vesna: 'ТЦ «Весна»', etazhi: 'ТЦ «Этажи»' };
+function locationNames(env) {
+  const names = { ...defaultNames };
+  try {
+    for (const account of Object.values(JSON.parse(env.PEAK_ACCESS || '{}'))) {
+      if (account?.role === 'store' && storeId(account.store) && clean(account.name, 100)) names[account.store] = account.name;
+    }
+  } catch { /* настройка проверяется в actor() */ }
+  try {
+    for (const [id, name] of Object.entries(JSON.parse(env.PEAK_LOCATION_NAMES || '{}'))) if (storeId(id) && clean(name, 100)) names[id] = name;
+  } catch { /* необязательная настройка */ }
+  return names;
+}
+
+// Остатки для сайта. ?since=<updatedAt> — если выгрузка не менялась, ответ без данных (экономит трафик при опросе раз в минуту).
+// network — остатки остальных магазинов той же выгрузки, только положительные: [артикул, цвет, размер, [[индекс магазина, шт.], ...]].
+async function readStock(request, env, user) {
+  const since = new URL(request.url).searchParams.get('since');
+  const { results: heads } = await env.DB.prepare('SELECT location, updated FROM stock').all();
+  const own = user.role === 'warehouse' ? [warehouse] : [warehouse, user.store];
+  const mine = heads.filter(x => own.includes(x.location));
+  const updated = mine.length === own.length && mine.every(x => x.updated === mine[0].updated) ? mine[0].updated : null;
+  if (!updated) return json({ updatedAt: null, warehouse: [], store: [], network: null });
+  const updatedAt = new Date(updated).toISOString();
+  if (since === updatedAt) return json({ updatedAt, unchanged: true });
+  const expected = new Set((env.PEAK_STOCK_LOCATIONS || '').split(',').map(x => x.trim()));
+  const others = env.PEAK_NETWORK_STOCK === 'off' ? [] : heads
+    .filter(x => !own.includes(x.location) && x.location !== warehouse && expected.has(x.location) && x.updated === updated)
+    .map(x => x.location);
+  const wanted = [...own, ...others];
+  const { results } = await env.DB.prepare(`SELECT location, rows FROM stock WHERE location IN (${wanted.map(() => '?').join(', ')})`)
+    .bind(...wanted).all();
+  const rowsOf = id => JSON.parse(results.find(x => x.location === id)?.rows ?? '[]');
+  const names = locationNames(env);
+  const locations = others.map(id => ({ id, name: names[id] || id }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+  const network = new Map();
+  locations.forEach(({ id }, index) => {
+    for (const [a, c, z, q] of rowsOf(id)) {
+      if (!(q > 0)) continue;
+      const k = skuKey(a, c, z);
+      if (!network.has(k)) network.set(k, [a, c, z, []]);
+      network.get(k)[3].push([index, q]);
+    }
+  });
+  return json({ updatedAt, warehouse: rowsOf(warehouse), store: user.role === 'store' ? rowsOf(user.store) : [],
+    network: locations.length ? { locations, rows: [...network.values()] } : null });
+}
+
+// Штрихкоды из 1С: полный список [штрихкод, артикул, цвет, размер]. Хранится частями по ~1,2 МБ.
+async function saveBarcodes(request, env) {
+  if (!await authorizedSync(request, env)) return error(403, 'Доступ к обмену закрыт');
+  const body = await readBody(request);
+  const updatedAt = typeof body?.updatedAt === 'string' && Date.parse(body.updatedAt);
+  if (!updatedAt || updatedAt > Date.now() + 300_000 || updatedAt < Date.now() - 7 * 86_400_000 ||
+      !Array.isArray(body.rows) || body.rows.length < 1 || body.rows.length > 200_000) {
+    return error(400, 'Укажите дату выгрузки и список штрихкодов');
+  }
+  const seen = new Map();
+  const rows = [];
+  for (const row of body.rows) {
+    if (!Array.isArray(row) || row.length !== 4 || !clean(row[0], 48) || !/^[\x21-\x7e]{4,48}$/.test(row[0]) ||
+        !clean(row[1], 100) || !row[1].trim() || !clean(row[2], 100) || !clean(row[3], 50)) return error(400, 'Неверная строка штрихкодов');
+    const target = skuKey(row[1], row[2], row[3]);
+    if (seen.has(row[0])) {
+      if (seen.get(row[0]) !== target) return error(400, 'Штрихкод ' + row[0] + ' привязан к разным товарам');
+      continue;
+    }
+    seen.set(row[0], target);
+    rows.push(row);
+  }
+  const current = await env.DB.prepare('SELECT MAX(updated) AS updated FROM barcodes').first();
+  if (current?.updated >= updatedAt) return json({ updatedAt: new Date(updatedAt).toISOString(), rows: rows.length, applied: false });
+  const parts = [];
+  let part = [], size = 0;
+  for (const row of rows) {
+    const bytes = JSON.stringify(row).length * 2;
+    if (size + bytes > 1_200_000 && part.length) { parts.push(part); part = []; size = 0; }
+    part.push(row); size += bytes;
+  }
+  parts.push(part);
+  await env.DB.batch([env.DB.prepare('DELETE FROM barcodes'),
+    ...parts.map((list, i) => env.DB.prepare('INSERT INTO barcodes (part, updated, rows) VALUES (?, ?, ?)').bind(i, updatedAt, JSON.stringify(list)))]);
+  return json({ updatedAt: new Date(updatedAt).toISOString(), rows: rows.length, parts: parts.length, applied: true });
+}
+
+async function readBarcodes(request, env) {
+  const since = new URL(request.url).searchParams.get('since');
+  const { results } = await env.DB.prepare('SELECT updated, rows FROM barcodes ORDER BY part').all();
+  if (!results.length) return json({ updatedAt: null, rows: [] });
+  const updatedAt = new Date(results[0].updated).toISOString();
+  if (since === updatedAt) return json({ updatedAt, unchanged: true });
+  return json({ updatedAt, rows: results.filter(x => x.updated === results[0].updated).flatMap(x => JSON.parse(x.rows)) });
+}
+
 function orderRow(row) {
   return { id: row.id, store: row.store, name: row.store_name, created: row.created,
     items: JSON.parse(row.items), status: row.status, document: row.document, note: row.note,
@@ -177,6 +273,7 @@ export default {
     try {
       const method = request.method;
       if (path === '/api/sync/stock' && method === 'POST') return await saveStock(request, env);
+      if (path === '/api/sync/barcodes' && method === 'POST') return await saveBarcodes(request, env);
       const user = actor(request, env);
       if (!user && (path === '/api/session' || path === '/api/owner-preview')) {
         if (!env.PEAK_OWNER_EMAIL || (request.headers.get('oai-authenticated-user-email')||'').toLowerCase() !== env.PEAK_OWNER_EMAIL.toLowerCase()) return error(403,'Аккаунту ещё не назначен магазин.');
@@ -185,7 +282,8 @@ export default {
       // Склад видит каталог с остатками Лиственной: так при обработке заявки видно, хватает ли товара.
       if (path === '/api/session' && method === 'GET') return json({ user });
       if (!user) return error(403, 'Для аккаунта ещё не назначен магазин или роль склада');
-      if (path === '/api/stock' && method === 'GET') return json(await getStock(env.DB, user));
+      if (path === '/api/stock' && method === 'GET') return await readStock(request, env, user);
+      if (path === '/api/barcodes' && method === 'GET') return await readBarcodes(request, env);
       if (path === '/api/orders') {
         if (method === 'GET') return await listOrders(env.DB, user);
         if (method === 'POST') return await createOrder(request, env.DB, user);

@@ -45,8 +45,9 @@
       <div class="toolbar">
         <label class="search">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
-          <input id="search" type="search" placeholder="Артикул, название или цвет" aria-label="Поиск товара" autocomplete="off" enterkeyhint="search">
+          <input id="search" type="search" placeholder="Артикул, название, цвет или штрихкод" aria-label="Поиск товара" autocomplete="off" enterkeyhint="search">
           <kbd aria-hidden="true">/</kbd>
+          <button type="button" id="scan-button" class="scan-btn" aria-label="Сканировать штрихкод камерой" title="Сканировать штрихкод"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 8v8M10 8v8M13 8v8M17 8v8"/></svg></button>
         </label>
         <label class="sort"><span class="sr">Сортировка</span>
           <select id="sort">
@@ -78,6 +79,7 @@
             <option value="">Все товары</option>
             <option value="size">Недостающие размеры</option>
             <option value="article">Нет в магазине</option>
+            <option value="network">Нет на Лиственной, есть в сети</option>
             <option value="negative">Отрицательные остатки</option>
           </select>
         </label>
@@ -115,6 +117,18 @@
   <dialog id="cart-dialog" class="cart-dialog" aria-labelledby="cart-title"></dialog>
   <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-text">
     <form method="dialog"><p id="confirm-text"></p><footer><button class="secondary" value="no">Отмена</button><button class="primary" value="yes" id="confirm-yes">Да</button></footer></form>
+  </dialog>
+  <dialog id="scan-dialog" class="scan-dialog" aria-labelledby="scan-title">
+    <div class="modal-head">
+      <div><h2 id="scan-title">Сканировать штрихкод</h2><div class="meta">Держите бирку горизонтально внутри рамки</div></div>
+      <div class="head-actions">
+        <button type="button" class="icon-btn" id="scan-torch" hidden aria-pressed="false" aria-label="Фонарик"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 2h6l-1 6h3l-7 14 1-9H8z"/></svg></button>
+        <button class="close" type="button" id="scan-close" aria-label="Закрыть">×</button>
+      </div>
+    </div>
+    <div class="scan-view"><video id="scan-video" playsinline muted></video><div class="scan-frame" aria-hidden="true"><i></i></div></div>
+    <p id="scan-status" class="scan-status" role="status"></p>
+    <form id="scan-manual" class="scan-manual"><input id="scan-code" type="text" inputmode="numeric" autocomplete="off" placeholder="Или введите штрихкод / артикул" aria-label="Штрихкод или артикул вручную"><button class="primary" type="submit">Найти</button></form>
   </dialog>
   <div id="print-area" aria-hidden="true"></div>
   <p id="toast" class="toast" role="status" hidden></p>

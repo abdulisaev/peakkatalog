@@ -1,0 +1,5 @@
+CREATE TABLE barcodes (
+  part INTEGER PRIMARY KEY NOT NULL,
+  updated INTEGER NOT NULL,
+  rows TEXT NOT NULL
+);
