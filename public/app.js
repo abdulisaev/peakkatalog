@@ -10,6 +10,8 @@ const collator = new Intl.Collator('ru-RU', { numeric: true, sensitivity: 'base'
 const clock = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Europe/Moscow' });
 const timeOnly = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' });
 const offline = location.protocol === 'file:';
+// Данные встроены в файл (офлайн-демо): работает и с диска, и в окне предпросмотра, и с любого адреса.
+const embedded = Boolean(window.PEAK_DEMO_DATA?.catalog);
 const WAREHOUSE = 'listvennaya';
 const STALE_MINUTES = 75;
 const PAGE = 24;
@@ -79,9 +81,9 @@ let orderRead = 0;
 
 // ---------- Общие функции ----------
 async function api(path, body, method = 'POST') {
-  if (offline && path === '/api/session') return { user: null };
-  if (offline && path === '/data/catalog.json') return window.PEAK_DEMO_DATA.catalog;
-  if (offline && path === '/data/stock-example.json') return window.PEAK_DEMO_DATA.stock;
+  if (embedded && path === '/api/session') return { user: null };
+  if (embedded && path === '/data/catalog.json') return window.PEAK_DEMO_DATA.catalog;
+  if (embedded && (path === '/data/stock-example.json' || path === '/api/owner-preview')) return window.PEAK_DEMO_DATA.stock;
   const options = body === undefined ? {} : { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) };
   const response = await fetch(path, options);
   const data = await response.json().catch(() => null);
@@ -857,7 +859,7 @@ async function submitCart(button) {
   const controls = [...cartDialog.querySelectorAll('button,input,textarea')];
   controls.forEach(c => { c.disabled = true; });
   button.textContent = 'Отправляю…';
-  state.orderId ||= crypto.randomUUID();
+  state.orderId ||= crypto.randomUUID?.() ?? '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, c => (c ^ (Math.random() * 16) >> (c / 4)).toString(16));
   saveCart();
   const comment = state.comment.trim();
   try {
@@ -1420,7 +1422,7 @@ async function start() {
     state.catalog = catalog;
     state.demo = session.user === null;
     if (state.demo) {
-      state.demoLocations = (await api(offline ? '/data/stock-example.json' : '/api/owner-preview')).locations;
+      state.demoLocations = (await api(embedded ? '/data/stock-example.json' : '/api/owner-preview')).locations;
       for (const loc of state.demoLocations) $('demo-role').add(new Option(loc.name, loc.id));
       selectDemoLocation(storageRead('peak-demo-location', 'etazhi'));
     } else {
