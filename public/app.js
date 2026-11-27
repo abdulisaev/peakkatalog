@@ -115,14 +115,18 @@ const qty = value => value == null ? '—' : fmt.format(value);
 const numClass = value => value == null ? '' : value < 0 ? 'neg' : value === 0 ? 'zero' : 'pos';
 function photoSrc(kind, id) {
   if (id == null) return null;
-  if (window.PEAK_PHOTOS) return window.PEAK_PHOTOS[kind + '-' + Number(id)] ?? null;
+  // Во встроенном файле лежат только крупные фото — их же браузер уменьшает для плиток.
+  if (window.PEAK_PHOTOS) return window.PEAK_PHOTOS[kind + '-' + Number(id)] ?? window.PEAK_PHOTOS['detail-' + Number(id)] ?? null;
   return (offline ? './' : '/') + 'photo/' + kind + '-' + Number(id) + '.jpg';
 }
 function photoMarkup(id, kind, label, eager = false) {
   const src = photoSrc(kind, id);
   if (!src) return `<span class="no-photo">${icons.peak}Нет фото</span>`;
+  // Плитки на телефонах и экранах с масштабом 125–200% получают фото 580 px вместо превью 250 px.
+  const big = kind === 'thumb' ? photoSrc('detail', id) : null;
+  const srcset = big && big !== src ? ` srcset="${safe(src)} 250w, ${safe(big)} 580w" sizes="(max-width: 760px) 48vw, 300px"` : '';
   const side = kind === 'thumb' ? 250 : 580;
-  return `<img src="${safe(src)}" width="${side}" height="${side}" alt="${safe(label)}" ${eager ? 'fetchpriority="high"' : 'loading="lazy"'} decoding="async">`;
+  return `<img src="${safe(src)}"${srcset} width="${side}" height="${side}" alt="${safe(label)}" ${eager ? 'fetchpriority="high"' : 'loading="lazy"'} decoding="async">`;
 }
 async function copyText(text) {
   try { await navigator.clipboard.writeText(text); return true; } catch {
